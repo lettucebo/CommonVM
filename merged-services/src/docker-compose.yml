@@ -32,7 +32,7 @@ services:
       - backend
 
   codimd:
-    image: hackmdio/hackmd:2.5.4
+    image: hackmdio/hackmd:2.6.1
     restart: always
     environment:
       - CMD_DB_URL=postgres://${CODIMD_DB_USER}:${CODIMD_DB_PASSWORD}@codimd-db/${CODIMD_DB_NAME}
