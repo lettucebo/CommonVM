@@ -1,3 +1,17 @@
+# CodiMD 與 n8n 合併服務
+
+此設定使用 Docker Compose 和 Caddy 作為反向代理，將 CodiMD 和 n8n 合併到單一 VM 上。
+
+> **說明**：此專案合併了兩個獨立的 Docker 部署：
+> - [n8n-azure-vm-starter](https://github.com/lettucebo/n8n-azure-vm-starter) - n8n 工作流程自動化
+> - [CodiMD-Doc](https://github.com/lettucebo/CodiMD-Doc) - 協作式 Markdown 編輯器
+
+## 前置需求
+
+- Azure VM (推薦使用 Ubuntu)
+- 已安裝 Docker 和 Docker Compose
+- 公用 IP 位址
+- 指向 VM IP 的 DNS 紀錄：
   - `doc.yu.money`
   - `n8n.yu.money`
 - Azure 網路安全性群組 (NSG) 已開啟 Port 80 和 443
