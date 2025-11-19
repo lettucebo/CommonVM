@@ -1,5 +1,5 @@
 {
-    email tzyu@yu.money
+    email money.yu@yu.money
 }
 
 # CodiMD
@@ -7,7 +7,7 @@
     reverse_proxy codimd:3000
     
     # 使用自簽憑證進行測試 (DNS 切換後請移除此行)
-    tls internal
+    # tls internal
 
     # Security Headers
     header {
@@ -27,7 +27,7 @@
     }
 
     # 使用自簽憑證進行測試 (DNS 切換後請移除此行)
-    tls internal
+    # tls internal
 
     # Security Headers
     header {

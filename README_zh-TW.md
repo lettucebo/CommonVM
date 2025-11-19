@@ -1,13 +1,3 @@
-# CodiMD 與 n8n 合併服務
-
-此設定使用 Docker Compose 和 Caddy 作為反向代理，將 CodiMD 和 n8n 合併到單一 VM 上。
-
-## 前置需求
-
-- Azure VM (推薦使用 Ubuntu)
-- 已安裝 Docker 和 Docker Compose
-- 公用 IP 位址
-- 指向 VM IP 的 DNS 紀錄：
   - `doc.yu.money`
   - `n8n.yu.money`
 - Azure 網路安全性群組 (NSG) 已開啟 Port 80 和 443
@@ -161,3 +151,114 @@ cat n8n_backup.sql | docker exec -i src-n8n-db-1 psql -U n8n -d n8n
 # 重新啟動服務
 docker compose start codimd n8n
 ```
+
+## 成本估算 💰
+
+每月成本明細 (Azure B2s VM)：
+- VM (B2s)：約 $29.20
+- 儲存空間 (兩個 30GB Standard SSD 磁碟)：約 $5.00
+- **總計：約 $34.20/月**
+
+_比您的咖啡癮還便宜！☕_
+
+## 維護
+
+### 更新
+
+更新服務到最新版本：
+```bash
+docker compose pull
+docker compose up -d
+```
+
+### 監控
+
+1. 檢查容器狀態：
+```bash
+docker compose ps
+```
+
+2. 查看日誌：
+```bash
+docker compose logs -f
+```
+
+3. 監控系統資源：
+```bash
+htop
+```
+
+### 備份
+
+可使用 cron 設定自動備份：
+```bash
+# 加入 crontab，每天午夜執行備份
+(crontab -l 2>/dev/null; echo "0 0 * * * /path/to/backup.sh") | crontab -
+```
+
+## 安全性考量 🔒
+
+1. **防火牆規則**：
+   - Azure NSG 僅允許 80 (HTTP) 和 443 (HTTPS) 埠
+   - 建議在初始設定後停用 SSH 埠 22 (改用 Azure Bastion)
+
+2. **SSH 存取**：
+   - 僅使用 SSH 金鑰驗證
+   - 應停用密碼驗證
+
+3. **應用程式安全性**：
+   - 透過 Caddy 強制使用 HTTPS
+   - 建議定期進行安全性更新
+   - CodiMD 使用 Microsoft Entra ID (OAuth2) 進行驗證
+   - n8n 支援內建驗證和雙因素驗證 (2FA)
+
+## 疑難排解
+
+### 無法連線到服務
+- 檢查 Azure Portal 中的 VM 狀態
+- 驗證 DNS 設定是否指向 VM IP
+- 檢查容器：`docker compose ps`
+- 查看日誌：`docker compose logs -f`
+
+### 資料庫連線問題
+- 檢查 PostgreSQL 日誌：`docker compose logs codimd-db` 或 `docker compose logs n8n-db`
+- 驗證 `.env` 中的環境變數
+- 確保資料庫容器正在運行
+
+### SSL/HTTPS 問題
+- 檢查 Caddy 日誌：`docker compose logs caddy`
+- 驗證網域是否指向正確的 IP
+- 確保 Azure NSG 中的 80 和 443 埠已開啟
+- 本機測試時，使用 Caddyfile 中的 `tls internal` (已設定)
+
+### n8n 雙因素驗證/登入問題
+如果您從舊的 n8n 實例遷移後無法使用 2FA 登入：
+1. 從舊實例取得加密金鑰：
+   ```bash
+   docker exec -t <舊容器名稱> cat /home/node/.n8n/config
+   ```
+2. 加入到 `.env`：
+   ```bash
+   N8N_ENCRYPTION_KEY=您的舊金鑰
+   ```
+3. 刪除自動產生的設定檔並重啟：
+   ```bash
+   docker compose stop n8n
+   sudo rm /mnt/data/n8n/data/config
+   docker compose up -d
+   ```
+
+## 支援
+
+如有問題：
+1. 查看 [n8n 文件](https://docs.n8n.io/)
+2. 查看 [CodiMD 文件](https://hackmd.io/c/codimd-documentation)
+3. 在原始專案中開啟 issue：
+   - [n8n-azure-vm-starter](https://github.com/lettucebo/n8n-azure-vm-starter)
+   - [CodiMD-Doc](https://github.com/lettucebo/CodiMD-Doc)
+4. 造訪 [n8n 社群論壇](https://community.n8n.io/)
+
+## 授權
+
+此部署範本採用 MIT 授權。n8n 和 CodiMD 各自採用其各自的授權條款。
+
