@@ -1,0 +1,43 @@
+# n8n Automation Workflow Service
+n8n.yu.money {
+   # Debug Logs
+   log {
+       output stderr
+       format console
+       level DEBUG
+   }
+   
+   # Security Headers
+   header {
+       # Enable HSTS
+       Strict-Transport-Security "max-age=31536000; includeSubDomains"
+       # Disable FLoC tracking
+       Permissions-Policy "interest-cohort=()"
+       # XSS Protection
+       X-XSS-Protection "1; mode=block"
+       # Prevent Clickjacking
+       X-Frame-Options "SAMEORIGIN"
+       # Disable MIME Type Sniffing
+       X-Content-Type-Options "nosniff"
+   }
+   
+   # Reverse Proxy to n8n Container
+   reverse_proxy localhost:5678 {
+       # WebSocket Support (required by n8n)
+       header_up X-Forwarded-Proto "https"
+       header_up Host {host}
+   }
+}
+
+# Configuration Notes:
+# 1. n8n.yu.money → localhost:5678 (n8n service)
+# 3. Automatic SSL Certificate Management (Let's Encrypt)
+# 4. WebSocket Support (required by both services)
+# 5. Security Header Configuration
+#
+# Features:
+# - Automatic HTTP to HTTPS Redirection
+# - Automatic SSL Certificate Renewal
+# - WebSocket Connection Support
+# - Security Header Protection
+# - Detailed Debug Logs

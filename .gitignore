@@ -1,0 +1,40 @@
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE directories
+.vscode/
+.idea/
+
+# Env files
+.env
+src/.env
+*.env.local
+
+# Logs
+logs/
+*.log
+
+# Backup files
+*.bak
+*.backup
+
+# Node modules
+node_modules/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# SSL certs and keys
+*.key
+*.pem
+*.cert
+*.crt
+
+# Docker
+docker-compose.override.yml
+
+# Temporary files
+*~
+*.swp

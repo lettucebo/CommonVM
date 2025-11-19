@@ -1,0 +1,50 @@
+version: "3"
+services:
+  database:
+    image: postgres:11.6-alpine
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    volumes:
+      - "database-data:/var/lib/postgresql/data"
+    restart: always
+  codimd:
+    image: hackmdio/hackmd:2.5.3
+    environment:
+      - CMD_DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@database/${POSTGRES_DB}
+      - CMD_USECDN=false
+      - CMD_DOMAIN=${CMD_DOMAIN}
+      - CMD_PROTOCOL_USESSL=${CMD_PROTOCOL_USESSL}
+      - CMD_ALLOW_ANONYMOUS=false
+      - CMD_EMAIL=false
+      - CMD_ALLOW_ANONYMOUS=false
+      - CMD_EMAIL=false
+      - CMD_ALLOW_EMAIL_REGISTER=false
+      - CMD_OAUTH2_PROVIDERNAME=${CMD_OAUTH2_PROVIDERNAME}
+      - CMD_OAUTH2_SCOPE=${CMD_OAUTH2_SCOPE}
+      - CMD_OAUTH2_CLIENT_ID=${CMD_OAUTH2_CLIENT_ID}
+      - CMD_OAUTH2_CLIENT_SECRET=${CMD_OAUTH2_CLIENT_SECRET}
+      - CMD_OAUTH2_AUTHORIZATION_URL=${CMD_OAUTH2_AUTHORIZATION_URL}
+      - CMD_OAUTH2_TOKEN_URL=${CMD_OAUTH2_TOKEN_URL}
+      - CMD_OAUTH2_USER_PROFILE_URL=${CMD_OAUTH2_USER_PROFILE_URL}
+      - CMD_OAUTH2_USER_PROFILE_DISPLAY_NAME_ATTR=${CMD_OAUTH2_USER_PROFILE_DISPLAY_NAME_ATTR}
+      - CMD_OAUTH2_USER_PROFILE_USERNAME_ATTR=${CMD_OAUTH2_USER_PROFILE_USERNAME_ATTR}
+      - CMD_OAUTH2_USER_PROFILE_EMAIL_ATTR=${CMD_OAUTH2_USER_PROFILE_EMAIL_ATTR}
+      #- CMD_GOOGLE_CLIENTID=
+      #- CMD_GOOGLE_CLIENTSECRET=
+      #- CMD_DROPBOX_CLIENTID=
+      #- CMD_DROPBOX_CLIENTSECRET=
+      - CMD_IMAGE_UPLOAD_TYPE=azure
+      - CMD_AZURE_CONNECTION_STRING=${CMD_AZURE_CONNECTION_STRING}
+      - CMD_AZURE_CONTAINER=${CMD_AZURE_CONTAINER}
+    depends_on:
+      - database
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - upload-data:/home/hackmd/app/public/uploads
+    restart: always
+volumes:
+  database-data: {}
+  upload-data: {}
