@@ -6,6 +6,9 @@
 {$CODIMD_DOMAIN} {
     reverse_proxy codimd:3000
     
+    # 使用自簽憑證進行測試 (DNS 切換後請移除此行)
+    tls internal
+
     # Security Headers
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
@@ -22,6 +25,9 @@
         header_up X-Forwarded-Proto "https"
         header_up Host {host}
     }
+
+    # 使用自簽憑證進行測試 (DNS 切換後請移除此行)
+    tls internal
 
     # Security Headers
     header {
