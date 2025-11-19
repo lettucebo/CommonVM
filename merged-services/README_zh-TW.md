@@ -146,11 +146,17 @@ docker exec -t src-postgres-1 pg_dump -U n8n n8n > n8n_backup.sql
 # 停止應用程式容器以防止寫入
 docker compose stop codimd n8n
 
-# 還原 CodiMD 資料庫
-cat codimd_backup.sql | docker exec -i merged-services-codimd-db-1 psql -U codimd -d codimd
+# 1. 還原 CodiMD 資料庫
+# 注意：必須先刪除自動初始化的資料庫，否則會發生衝突
+docker exec -i src-codimd-db-1 psql -U codimd -d postgres -c "DROP DATABASE codimd;"
+docker exec -i src-codimd-db-1 psql -U codimd -d postgres -c "CREATE DATABASE codimd;"
+cat codimd_backup.sql | docker exec -i src-codimd-db-1 psql -U codimd -d codimd
 
-# 還原 n8n 資料庫
-cat n8n_backup.sql | docker exec -i merged-services-n8n-db-1 psql -U n8n -d n8n
+# 2. 還原 n8n 資料庫
+# 注意：必須先刪除自動初始化的資料庫，否則會發生衝突
+docker exec -i src-n8n-db-1 psql -U n8n -d postgres -c "DROP DATABASE n8n;"
+docker exec -i src-n8n-db-1 psql -U n8n -d postgres -c "CREATE DATABASE n8n;"
+cat n8n_backup.sql | docker exec -i src-n8n-db-1 psql -U n8n -d n8n
 
 # 重新啟動服務
 docker compose start codimd n8n
