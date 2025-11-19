@@ -15,6 +15,9 @@ services:
     depends_on:
       - codimd
       - n8n
+    environment:
+      - CODIMD_DOMAIN=${CODIMD_DOMAIN}
+      - N8N_DOMAIN=${N8N_DOMAIN}
     networks:
       - web
 
