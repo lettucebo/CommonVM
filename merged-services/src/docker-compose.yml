@@ -99,6 +99,7 @@ services:
       # Secrets from original config
       - THREADS_ACCESS_TOKEN=${N8N_THREADS_ACCESS_TOKEN}
       - EXCHANGE_API_KEY=${N8N_EXCHANGE_API_KEY}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
     volumes:
       - ${DATA_ROOT}/n8n/data:/home/node/.n8n
     depends_on:
