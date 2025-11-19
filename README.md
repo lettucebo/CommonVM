@@ -1,4 +1,4 @@
-# Merged CodiMD & n8n Services
+# Common Services
 
 This setup combines CodiMD and n8n onto a single VM using Docker Compose and Caddy as a reverse proxy.
 
