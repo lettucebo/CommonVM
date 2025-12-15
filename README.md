@@ -87,37 +87,10 @@ newgrp docker
    ```bash
    docker compose up -d
    ```
-6. **Verification (Before DNS Switch)**:
-   If you haven't pointed DNS to this VM yet, follow these steps for local verification:
-
-   **A. Modify Local Hosts File**
-   On your computer (not the Azure VM), modify the hosts file to point domains to the VM's public IP:
-   - **Windows**: `C:\Windows\System32\drivers\etc\hosts` (requires administrator privileges)
-   - **Mac/Linux**: `/etc/hosts` (requires sudo)
-
-   Add the following:
-   ```text
-   <VM_PUBLIC_IP> doc.yu.money
-   <VM_PUBLIC_IP> n8n.yu.money
-   ```
-
-   **B. Temporary Self-Signed Certificate (Already Configured)**
-   I've temporarily added `tls internal` to the `Caddyfile`. This allows Caddy to issue self-signed certificates for HTTPS without DNS.
    
-   **C. Test Connection**
-   1. Restart Docker services: `docker compose restart`
-   2. Open `https://doc.yu.money` and `https://n8n.yu.money` in your browser.
-   3. Your browser will warn about an insecure connection (due to self-signed cert). Click "Advanced" and "Proceed".
-   4. Verify CodiMD and n8n functionality (login, create notes, create workflows).
+   > **Note**: Ensure your DNS records are already pointing to the VM's public IP. Caddy will automatically obtain Let's Encrypt SSL certificates when the services start. Certificate renewal is handled automatically by Caddy.
 
-   **D. Prepare for Production**
-   Once everything works:
-   1. Remove the hosts file entries.
-   2. Point your DNS to the VM IP at your DNS provider.
-   3. Edit `src/Caddyfile` and remove the two `tls internal` lines.
-   4. Run `docker compose restart` to let Caddy obtain official Let's Encrypt certificates.
-
-7. **Final Verification**:
+6. **Final Verification**:
 
    - Check logs: `docker compose logs -f`
    - Access `https://doc.yu.money`
@@ -215,7 +188,13 @@ Automated backups can be configured using cron:
    - Use SSH key-based authentication only
    - Password authentication should be disabled
 
-3. **Application Security**:
+3. **SSL/TLS Certificates**:
+   - Caddy automatically obtains SSL certificates from Let's Encrypt
+   - Certificates are automatically renewed before expiration (no manual intervention required)
+   - The email address configured in `Caddyfile` receives expiration notices if renewal fails
+   - Port 80 must remain accessible for ACME HTTP-01 challenge during renewal
+
+4. **Application Security**:
    - HTTPS enforced via Caddy
    - Regular security updates recommended
    - CodiMD uses Microsoft Entra ID (OAuth2) for authentication
@@ -238,7 +217,8 @@ Automated backups can be configured using cron:
 - Check Caddy logs: `docker compose logs caddy`
 - Verify domain points to correct IP
 - Ensure ports 80 and 443 are open in Azure NSG
-- For local testing, use `tls internal` in Caddyfile (already configured)
+- Caddy uses Let's Encrypt for automatic SSL certificate issuance and renewal
+- If certificate renewal fails, ensure port 80 is accessible for ACME HTTP-01 challenge
 
 ### n8n 2FA/Login issues
 If you migrated from an old n8n instance and cannot login with 2FA:
