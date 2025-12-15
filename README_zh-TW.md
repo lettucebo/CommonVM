@@ -101,20 +101,27 @@ newgrp docker
    <VM_PUBLIC_IP> n8n.yu.money
    ```
 
-   **B. 暫時使用自簽憑證 (已設定)**
-   我已經在 `Caddyfile` 中暫時加入了 `tls internal` 設定。這會讓 Caddy 發發自簽憑證，讓您可以在沒有 DNS 的情況下啟動 HTTPS 服務。
+   **B. 暫時使用自簽憑證 (選用)**
+   若要在沒有 DNS 的情況下進行本機測試，可以暫時在 `src/Caddyfile` 的網站區塊中加入 `tls internal`：
+   ```
+   {$CODIMD_DOMAIN} {
+       tls internal
+       # ... 其他設定
+   }
+   ```
+   這會讓 Caddy 發自簽憑證，讓您可以在沒有 DNS 的情況下啟動 HTTPS 服務。
    
    **C. 測試連線**
    1. 重新啟動 Docker 服務：`docker compose restart`
    2. 在瀏覽器開啟 `https://doc.yu.money` 和 `https://n8n.yu.money`。
-   3. 瀏覽器會警告「連線不安全」(因為是自簽憑證)，請點擊「進階」並選擇「繼續前往」。
+   3. 如果使用自簽憑證，瀏覽器會警告「連線不安全」，請點擊「進階」並選擇「繼續前往」。
    4. 確認 CodiMD 和 n8n 功能正常 (登入、建立筆記、建立 Workflow)。
 
    **D. 準備正式上線**
    確認一切正常後：
    1. 移除本機 hosts 檔案中的設定。
    2. 在 DNS 供應商處將網域指向 VM IP。
-   3. 編輯 `src/Caddyfile`，移除 `tls internal` 那兩行設定。
+   3. 如果您有加入 `tls internal` 進行測試，請從 `src/Caddyfile` 中移除。
    4. 執行 `docker compose restart` 讓 Caddy 申請正式的 Let's Encrypt 憑證。
 
 7. **正式驗證**：
@@ -243,7 +250,7 @@ htop
 - 檢查 Caddy 日誌：`docker compose logs caddy`
 - 驗證網域是否指向正確的 IP
 - 確保 Azure NSG 中的 80 和 443 埠已開啟
-- 本機測試時，使用 Caddyfile 中的 `tls internal` (已設定)
+- 本機測試時，可以暫時在 Caddyfile 的網站區塊中加入 `tls internal`
 
 ### n8n 雙因素驗證/登入問題
 如果您從舊的 n8n 實例遷移後無法使用 2FA 登入：

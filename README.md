@@ -101,20 +101,27 @@ newgrp docker
    <VM_PUBLIC_IP> n8n.yu.money
    ```
 
-   **B. Temporary Self-Signed Certificate (Already Configured)**
-   I've temporarily added `tls internal` to the `Caddyfile`. This allows Caddy to issue self-signed certificates for HTTPS without DNS.
+   **B. Temporary Self-Signed Certificate (Optional)**
+   For local testing without DNS, you can temporarily add `tls internal` to the site blocks in `src/Caddyfile`:
+   ```
+   {$CODIMD_DOMAIN} {
+       tls internal
+       # ... rest of config
+   }
+   ```
+   This allows Caddy to issue self-signed certificates for HTTPS without DNS.
    
    **C. Test Connection**
    1. Restart Docker services: `docker compose restart`
    2. Open `https://doc.yu.money` and `https://n8n.yu.money` in your browser.
-   3. Your browser will warn about an insecure connection (due to self-signed cert). Click "Advanced" and "Proceed".
+   3. If using self-signed certs, your browser will warn about an insecure connection. Click "Advanced" and "Proceed".
    4. Verify CodiMD and n8n functionality (login, create notes, create workflows).
 
    **D. Prepare for Production**
    Once everything works:
    1. Remove the hosts file entries.
    2. Point your DNS to the VM IP at your DNS provider.
-   3. Edit `src/Caddyfile` and remove the two `tls internal` lines.
+   3. If you added `tls internal` for testing, remove it from `src/Caddyfile`.
    4. Run `docker compose restart` to let Caddy obtain official Let's Encrypt certificates.
 
 7. **Final Verification**:
@@ -238,7 +245,7 @@ Automated backups can be configured using cron:
 - Check Caddy logs: `docker compose logs caddy`
 - Verify domain points to correct IP
 - Ensure ports 80 and 443 are open in Azure NSG
-- For local testing, use `tls internal` in Caddyfile (already configured)
+- For local testing, you can temporarily add `tls internal` to site blocks in Caddyfile
 
 ### n8n 2FA/Login issues
 If you migrated from an old n8n instance and cannot login with 2FA:
