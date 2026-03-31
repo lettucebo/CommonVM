@@ -87,37 +87,10 @@ newgrp docker
    ```bash
    docker compose up -d
    ```
-6. **驗證 (DNS 切換前)**：
-   如果您尚未將 DNS 指向此 VM，請依照以下步驟進行本機驗證：
-
-   **A. 修改本機 Hosts 檔案**
-   在您的電腦 (不是 Azure VM) 上修改 hosts 檔案，將網域指向 VM 的公用 IP：
-   - **Windows**: `C:\Windows\System32\drivers\etc\hosts` (需用管理員權限開啟記事本)
-   - **Mac/Linux**: `/etc/hosts` (需用 sudo)
-
-   新增以下內容：
-   ```text
-   <VM_PUBLIC_IP> doc.yu.money
-   <VM_PUBLIC_IP> n8n.yu.money
-   ```
-
-   **B. 暫時使用自簽憑證 (已設定)**
-   我已經在 `Caddyfile` 中暫時加入了 `tls internal` 設定。這會讓 Caddy 發發自簽憑證，讓您可以在沒有 DNS 的情況下啟動 HTTPS 服務。
    
-   **C. 測試連線**
-   1. 重新啟動 Docker 服務：`docker compose restart`
-   2. 在瀏覽器開啟 `https://doc.yu.money` 和 `https://n8n.yu.money`。
-   3. 瀏覽器會警告「連線不安全」(因為是自簽憑證)，請點擊「進階」並選擇「繼續前往」。
-   4. 確認 CodiMD 和 n8n 功能正常 (登入、建立筆記、建立 Workflow)。
+   > **注意**：請確保您的 DNS 紀錄已指向 VM 的公用 IP。Caddy 會在服務啟動時自動取得 Let's Encrypt SSL 憑證。憑證續期由 Caddy 自動處理。
 
-   **D. 準備正式上線**
-   確認一切正常後：
-   1. 移除本機 hosts 檔案中的設定。
-   2. 在 DNS 供應商處將網域指向 VM IP。
-   3. 編輯 `src/Caddyfile`，移除 `tls internal` 那兩行設定。
-   4. 執行 `docker compose restart` 讓 Caddy 申請正式的 Let's Encrypt 憑證。
-
-7. **正式驗證**：
+6. **正式驗證**：
    - 檢查日誌：`docker compose logs -f`
    - 存取 `https://doc.yu.money`
    - 存取 `https://n8n.yu.money`
@@ -220,7 +193,13 @@ htop
    - 僅使用 SSH 金鑰驗證
    - 應停用密碼驗證
 
-3. **應用程式安全性**：
+3. **SSL/TLS 憑證**：
+   - Caddy 自動從 Let's Encrypt 取得 SSL 憑證
+   - 憑證會在到期前自動續期（無需手動介入）
+   - 在 `Caddyfile` 中設定的電子郵件地址會在續期失敗時收到通知
+   - 80 埠必須保持可存取以供 ACME HTTP-01 驗證使用
+
+4. **應用程式安全性**：
    - 透過 Caddy 強制使用 HTTPS
    - 建議定期進行安全性更新
    - CodiMD 使用 Microsoft Entra ID (OAuth2) 進行驗證
@@ -243,7 +222,8 @@ htop
 - 檢查 Caddy 日誌：`docker compose logs caddy`
 - 驗證網域是否指向正確的 IP
 - 確保 Azure NSG 中的 80 和 443 埠已開啟
-- 本機測試時，使用 Caddyfile 中的 `tls internal` (已設定)
+- Caddy 使用 Let's Encrypt 自動簽發和續期 SSL 憑證
+- 如果憑證續期失敗，請確保 80 埠可供 ACME HTTP-01 驗證存取
 
 ### n8n 雙因素驗證/登入問題
 如果您從舊的 n8n 實例遷移後無法使用 2FA 登入：
