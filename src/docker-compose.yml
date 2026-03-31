@@ -108,6 +108,29 @@ services:
       - web
       - backend
 
+  # RustDesk Self-Hosted Server
+  rustdesk-hbbs:
+    image: rustdesk/rustdesk-server:latest
+    container_name: rustdesk-hbbs
+    command: hbbs -r ${RUSTDESK_DOMAIN}:21117
+    restart: unless-stopped
+    network_mode: "host"
+    depends_on:
+      - rustdesk-hbbr
+    volumes:
+      - ${DATA_ROOT}/rustdesk/data:/root
+    environment:
+      - ENCRYPTED_ONLY=${RUSTDESK_ENCRYPTED_ONLY:-1}
+
+  rustdesk-hbbr:
+    image: rustdesk/rustdesk-server:latest
+    container_name: rustdesk-hbbr
+    command: hbbr
+    restart: unless-stopped
+    network_mode: "host"
+    volumes:
+      - ${DATA_ROOT}/rustdesk/data:/root
+
 networks:
   web:
   backend:

@@ -1,10 +1,11 @@
-# CodiMD 與 n8n 合併服務
+# CodiMD、n8n 與 RustDesk 合併服務
 
-此設定使用 Docker Compose 和 Caddy 作為反向代理，將 CodiMD 和 n8n 合併到單一 VM 上。
+此設定使用 Docker Compose 和 Caddy 作為反向代理，將 CodiMD、n8n 和 RustDesk 合併到單一 VM 上。
 
-> **說明**：此專案合併了兩個獨立的 Docker 部署：
+> **說明**：此專案合併了多個部署：
 > - [n8n-azure-vm-starter](https://github.com/lettucebo/n8n-azure-vm-starter) - n8n 工作流程自動化
 > - [CodiMD-Doc](https://github.com/lettucebo/CodiMD-Doc) - 協作式 Markdown 編輯器
+> - [RustDesk Server](https://github.com/rustdesk/rustdesk-server) - 自架遠端桌面中繼伺服器
 
 ## 前置需求
 
@@ -14,7 +15,10 @@
 - 指向 VM IP 的 DNS 紀錄：
   - `doc.yu.money`
   - `n8n.yu.money`
-- Azure 網路安全性群組 (NSG) 已開啟 Port 80 和 443
+- Azure 網路安全性群組 (NSG) 已開啟以下 Port：
+  - **80, 443** (HTTP/HTTPS，供 Caddy 使用)
+  - **21114-21119 TCP** (RustDesk)
+  - **21116 UDP** (RustDesk)
 
 ## 安裝 Docker (Ubuntu 24.04 LTS)
 
@@ -83,11 +87,15 @@ newgrp docker
    # 修正 CodiMD 上傳資料夾權限 (UID 1500)
    sudo chown -R 1500:1500 /mnt/data/codimd
    ```
-5. **啟動服務**：
+5. **建立 RustDesk 資料目錄**：
+   ```bash
+   sudo mkdir -p /mnt/data/rustdesk/data
+   ```
+6. **啟動服務**：
    ```bash
    docker compose up -d
    ```
-6. **驗證 (DNS 切換前)**：
+7. **驗證 (DNS 切換前)**：
    如果您尚未將 DNS 指向此 VM，請依照以下步驟進行本機驗證：
 
    **A. 修改本機 Hosts 檔案**
@@ -117,10 +125,37 @@ newgrp docker
    3. 編輯 `src/Caddyfile`，移除 `tls internal` 那兩行設定。
    4. 執行 `docker compose restart` 讓 Caddy 申請正式的 Let's Encrypt 憑證。
 
-7. **正式驗證**：
+8. **正式驗證**：
    - 檢查日誌：`docker compose logs -f`
    - 存取 `https://doc.yu.money`
    - 存取 `https://n8n.yu.money`
+
+## RustDesk 設定
+
+首次啟動後，RustDesk 會自動產生用於加密連線的金鑰對。
+
+1. **取得公鑰**：
+   ```bash
+   cat /mnt/data/rustdesk/data/id_ed25519.pub
+   ```
+2. **設定 RustDesk 用戶端**：
+   - 開啟 RustDesk 用戶端 → 設定 → 網路 → ID/中繼伺服器
+   - **ID 伺服器**：`<VM_PUBLIC_IP>`
+   - **中繼伺服器**：`<VM_PUBLIC_IP>`
+   - **金鑰**：貼上步驟 1 取得的公鑰
+3. **驗證連線**：
+   ```bash
+   # 檢查容器是否正常運行
+   docker compose ps rustdesk-hbbs rustdesk-hbbr
+
+   # 檢查日誌
+   docker compose logs rustdesk-hbbs rustdesk-hbbr
+
+   # 從外部機器測試 port
+   nc -zv <VM_PUBLIC_IP> 21116
+   ```
+
+> **注意**：預設已設定 `ENCRYPTED_ONLY=1`，強制所有用戶端使用公鑰連線，防止未經授權的連線。
 
 ## 資料庫遷移
 
@@ -213,7 +248,7 @@ htop
 ## 安全性考量 🔒
 
 1. **防火牆規則**：
-   - Azure NSG 僅允許 80 (HTTP) 和 443 (HTTPS) 埠
+   - Azure NSG 允許 80/443 (HTTP/HTTPS) 及 21114-21119 TCP + 21116 UDP (RustDesk) 埠
    - 建議在初始設定後停用 SSH 埠 22 (改用 Azure Bastion)
 
 2. **SSH 存取**：
@@ -245,6 +280,13 @@ htop
 - 確保 Azure NSG 中的 80 和 443 埠已開啟
 - 本機測試時，使用 Caddyfile 中的 `tls internal` (已設定)
 
+### RustDesk 連線問題
+- 確認 NSG 規則包含 TCP 21114-21119 和 UDP 21116
+- 檢查容器日誌：`docker compose logs rustdesk-hbbs rustdesk-hbbr`
+- 確保已設定 `network_mode: "host"` (port 不能與主機上其他服務衝突)
+- 確認用戶端已填入正確的公鑰：`cat /mnt/data/rustdesk/data/id_ed25519.pub`
+- 如果金鑰遺失，重啟 hbbs 容器：`docker compose restart rustdesk-hbbs`
+
 ### n8n 雙因素驗證/登入問題
 如果您從舊的 n8n 實例遷移後無法使用 2FA 登入：
 1. 從舊實例取得加密金鑰：
@@ -267,12 +309,13 @@ htop
 如有問題：
 1. 查看 [n8n 文件](https://docs.n8n.io/)
 2. 查看 [CodiMD 文件](https://hackmd.io/c/codimd-documentation)
-3. 在原始專案中開啟 issue：
+3. 查看 [RustDesk 文件](https://rustdesk.com/docs/en/self-host/rustdesk-server-oss/docker/)
+4. 在原始專案中開啟 issue：
    - [n8n-azure-vm-starter](https://github.com/lettucebo/n8n-azure-vm-starter)
    - [CodiMD-Doc](https://github.com/lettucebo/CodiMD-Doc)
-4. 造訪 [n8n 社群論壇](https://community.n8n.io/)
+5. 造訪 [n8n 社群論壇](https://community.n8n.io/)
 
 ## 授權
 
-此部署範本採用 MIT 授權。n8n 和 CodiMD 各自採用其各自的授權條款。
+此部署範本採用 MIT 授權。n8n、CodiMD 和 RustDesk 各自採用其各自的授權條款。
 

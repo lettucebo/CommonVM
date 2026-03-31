@@ -1,10 +1,11 @@
 # Common Services
 
-This setup combines CodiMD and n8n onto a single VM using Docker Compose and Caddy as a reverse proxy.
+This setup combines CodiMD, n8n, and RustDesk onto a single VM using Docker Compose and Caddy as a reverse proxy.
 
-> **Note**: This project merges two separate Docker deployments:
+> **Note**: This project merges multiple deployments:
 > - [n8n-azure-vm-starter](https://github.com/lettucebo/n8n-azure-vm-starter) - n8n workflow automation
 > - [CodiMD-Doc](https://github.com/lettucebo/CodiMD-Doc) - Collaborative markdown editor
+> - [RustDesk Server](https://github.com/rustdesk/rustdesk-server) - Self-hosted remote desktop relay
 
 ## Prerequisites
 
@@ -14,7 +15,10 @@ This setup combines CodiMD and n8n onto a single VM using Docker Compose and Cad
 - DNS records pointing to the VM IP:
   - `doc.yu.money`
   - `n8n.yu.money`
-- Ports 80 and 443 open in Azure Network Security Group (NSG)
+- Ports open in Azure Network Security Group (NSG):
+  - **80, 443** (HTTP/HTTPS for Caddy)
+  - **21114-21119 TCP** (RustDesk)
+  - **21116 UDP** (RustDesk)
 
 ## Install Docker (Ubuntu 24.04 LTS)
 
@@ -83,11 +87,15 @@ newgrp docker
    # Fix CodiMD folder permissions (UID 1500)
    sudo chown -R 1500:1500 /mnt/data/codimd
    ```
-5. **Start Services**:
+5. **Create RustDesk Data Directory**:
+   ```bash
+   sudo mkdir -p /mnt/data/rustdesk/data
+   ```
+6. **Start Services**:
    ```bash
    docker compose up -d
    ```
-6. **Verification (Before DNS Switch)**:
+7. **Verification (Before DNS Switch)**:
    If you haven't pointed DNS to this VM yet, follow these steps for local verification:
 
    **A. Modify Local Hosts File**
@@ -117,11 +125,38 @@ newgrp docker
    3. Edit `src/Caddyfile` and remove the two `tls internal` lines.
    4. Run `docker compose restart` to let Caddy obtain official Let's Encrypt certificates.
 
-7. **Final Verification**:
+8. **Final Verification**:
 
    - Check logs: `docker compose logs -f`
    - Access `https://doc.yu.money`
    - Access `https://n8n.yu.money`
+
+## RustDesk Configuration
+
+After the first startup, RustDesk generates a key pair for encrypted connections.
+
+1. **Retrieve the public key**:
+   ```bash
+   cat /mnt/data/rustdesk/data/id_ed25519.pub
+   ```
+2. **Configure RustDesk clients**:
+   - Open RustDesk client → Settings → Network → ID/Relay Server
+   - **ID Server**: `<VM_PUBLIC_IP>`
+   - **Relay Server**: `<VM_PUBLIC_IP>`
+   - **Key**: paste the public key from step 1
+3. **Verify connectivity**:
+   ```bash
+   # Check containers are running
+   docker compose ps rustdesk-hbbs rustdesk-hbbr
+
+   # Check logs
+   docker compose logs rustdesk-hbbs rustdesk-hbbr
+
+   # Test port from external machine
+   nc -zv <VM_PUBLIC_IP> 21116
+   ```
+
+> **Note**: `ENCRYPTED_ONLY=1` is set by default, which forces all clients to use the public key. This prevents unauthorized connections.
 
 ## Database Migration
 
@@ -208,7 +243,7 @@ Automated backups can be configured using cron:
 ## Security Considerations 🔒
 
 1. **Firewall Rules**:
-   - Azure NSG allows only ports 80 (HTTP) and 443 (HTTPS)
+   - Azure NSG allows ports 80/443 (HTTP/HTTPS) and 21114-21119 TCP + 21116 UDP (RustDesk)
    - Consider disabling SSH port 22 after initial setup (use Azure Bastion instead)
 
 2. **SSH Access**:
@@ -240,6 +275,13 @@ Automated backups can be configured using cron:
 - Ensure ports 80 and 443 are open in Azure NSG
 - For local testing, use `tls internal` in Caddyfile (already configured)
 
+### RustDesk connection issues
+- Verify NSG rules include TCP 21114-21119 and UDP 21116
+- Check containers: `docker compose logs rustdesk-hbbs rustdesk-hbbr`
+- Ensure `network_mode: "host"` is set (ports must not conflict with other host services)
+- Verify the client has the correct public key: `cat /mnt/data/rustdesk/data/id_ed25519.pub`
+- If key is missing, restart the hbbs container: `docker compose restart rustdesk-hbbs`
+
 ### n8n 2FA/Login issues
 If you migrated from an old n8n instance and cannot login with 2FA:
 1. Retrieve the old encryption key from the previous instance:
@@ -262,12 +304,13 @@ If you migrated from an old n8n instance and cannot login with 2FA:
 For issues:
 1. Check [n8n documentation](https://docs.n8n.io/)
 2. Check [CodiMD documentation](https://hackmd.io/c/codimd-documentation)
-3. Open an issue in the original repositories:
+3. Check [RustDesk documentation](https://rustdesk.com/docs/en/self-host/rustdesk-server-oss/docker/)
+4. Open an issue in the original repositories:
    - [n8n-azure-vm-starter](https://github.com/lettucebo/n8n-azure-vm-starter)
    - [CodiMD-Doc](https://github.com/lettucebo/CodiMD-Doc)
-4. Visit [n8n community forums](https://community.n8n.io/)
+5. Visit [n8n community forums](https://community.n8n.io/)
 
 ## License
 
-This deployment template is MIT licensed. n8n and CodiMD are licensed under their own respective terms.
+This deployment template is MIT licensed. n8n, CodiMD, and RustDesk are licensed under their own respective terms.
 
