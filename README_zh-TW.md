@@ -267,8 +267,10 @@ docker exec src-n8n-db-1 pg_dump -U n8n -d n8n -Fc --no-owner --no-privileges \
 docker exec src-outline-db-1 pg_dump -U outline -d outline -Fc --no-owner --no-privileges \
   > "/mnt/data/backup/${STAMP}/outline.dump"
 
-tar czf "/mnt/data/backup/${STAMP}/outline-data.tar.gz" \
+# 部分私密附件為 mode 0600，且由 Outline UID 1001 擁有。
+sudo tar czf "/mnt/data/backup/${STAMP}/outline-data.tar.gz" \
   -C /mnt/data/outline data
+sudo chown "$(id -u):$(id -g)" "/mnt/data/backup/${STAMP}/outline-data.tar.gz"
 
 # 非破壞性驗證 archive
 cat "/mnt/data/backup/${STAMP}/outline.dump" \

@@ -272,8 +272,10 @@ docker exec src-n8n-db-1 pg_dump -U n8n -d n8n -Fc --no-owner --no-privileges \
 docker exec src-outline-db-1 pg_dump -U outline -d outline -Fc --no-owner --no-privileges \
   > "/mnt/data/backup/${STAMP}/outline.dump"
 
-tar czf "/mnt/data/backup/${STAMP}/outline-data.tar.gz" \
+# Some private attachments are mode 0600 and owned by Outline's UID 1001.
+sudo tar czf "/mnt/data/backup/${STAMP}/outline-data.tar.gz" \
   -C /mnt/data/outline data
+sudo chown "$(id -u):$(id -g)" "/mnt/data/backup/${STAMP}/outline-data.tar.gz"
 
 # Non-destructive archive validation
 cat "/mnt/data/backup/${STAMP}/outline.dump" \
