@@ -1,4 +1,6 @@
-version: "3.8"
+# The Compose project name is pinned so the deploy directory can be moved
+# without renaming or recreating the running containers (src-*).
+name: src
 
 services:
   # Reverse Proxy
@@ -83,7 +85,7 @@ services:
       - backend
 
   n8n:
-    image: docker.io/n8nio/n8n:latest
+    image: n8nio/n8n:2.32.5
     restart: always
     environment:
       - DB_TYPE=postgresdb
@@ -101,6 +103,9 @@ services:
       - THREADS_ACCESS_TOKEN=${N8N_THREADS_ACCESS_TOKEN}
       - EXCHANGE_API_KEY=${N8N_EXCHANGE_API_KEY}
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      # n8n emits large auth headers; the default 16 KB limit truncates them.
+      # Must be kept in sync with Caddy's max_header_size.
+      - NODE_OPTIONS=--max-http-header-size=32768
     volumes:
       - ${DATA_ROOT}/n8n/data:/home/node/.n8n
     depends_on:

@@ -73,7 +73,7 @@ newgrp docker
    ```
 
    > **Tip**: You can use `df -h` or `lsblk` to verify the mount.
-2. **Copy Files**: Transfer this directory (`merged-services`) to your VM.
+2. **Copy Files**: Transfer this directory (`src`) to your VM.
 3. **Configure Environment**: 
    - Check `.env` and ensure all secrets are correct.
    - **Important**: Update `DATA_ROOT` in `.env` to point to your mounted disk path (default: `/mnt/data`).
@@ -186,11 +186,17 @@ docker exec -t CONTAINER_NAME pg_dump -U n8n n8n > n8n_backup.sql
 # Stop app containers
 docker compose stop codimd n8n
 
-# Restore CodiMD
-cat codimd_backup.sql | docker exec -i merged-services-codimd-db-1 psql -U codimd -d codimd
+# 1. Restore the CodiMD database
+# Note: the auto-initialised database must be dropped first, or the restore conflicts
+docker exec -i src-codimd-db-1 psql -U codimd -d postgres -c "DROP DATABASE codimd;"
+docker exec -i src-codimd-db-1 psql -U codimd -d postgres -c "CREATE DATABASE codimd;"
+cat codimd_backup.sql | docker exec -i src-codimd-db-1 psql -U codimd -d codimd
 
-# Restore n8n
-cat n8n_backup.sql | docker exec -i merged-services-n8n-db-1 psql -U n8n -d n8n
+# 2. Restore the n8n database
+# Note: the auto-initialised database must be dropped first, or the restore conflicts
+docker exec -i src-n8n-db-1 psql -U n8n -d postgres -c "DROP DATABASE n8n;"
+docker exec -i src-n8n-db-1 psql -U n8n -d postgres -c "CREATE DATABASE n8n;"
+cat n8n_backup.sql | docker exec -i src-n8n-db-1 psql -U n8n -d n8n
 
 # Restart services
 docker compose start codimd n8n

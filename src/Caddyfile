@@ -1,5 +1,10 @@
 {
     email {$ACME_EMAIL}
+
+    servers {
+        # Matches NODE_OPTIONS=--max-http-header-size=32768 on the n8n service.
+        max_header_size 32KB
+    }
 }
 
 # CodiMD

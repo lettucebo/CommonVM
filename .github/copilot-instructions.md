@@ -7,9 +7,10 @@ and bilingual Markdown docs.
 
 ## Working directory
 
-All compose operations run from `src/`. Container names follow the deploy directory: README
-examples use `merged-services-<service>-1` (the folder is copied to the VM as `merged-services`).
-Always confirm real names with `docker compose ps` before any `exec`/restore.
+All compose operations run from `src/`. The Compose project name is pinned to `src`
+via `name: src`, so containers are named `src-<service>-1` regardless of the deploy
+directory's path. Always confirm real names with `docker compose ps` before any
+`exec`/restore.
 
 ## Validate changes (there is no test/lint suite)
 
