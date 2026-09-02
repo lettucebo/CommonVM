@@ -158,7 +158,13 @@ services:
       - APP_NAME=${OUTLINE_APP_NAME}
       - SECRET_KEY=${OUTLINE_SECRET_KEY}
       - UTILS_SECRET=${OUTLINE_UTILS_SECRET}
-      - DATABASE_URL=******outline-db:5432/${OUTLINE_DB_NAME}
+      # Database supplied as discrete components rather than a connection URL,
+      # so the password is never embedded in a URL string.
+      - DATABASE_HOST=outline-db
+      - DATABASE_PORT=5432
+      - DATABASE_NAME=${OUTLINE_DB_NAME}
+      - DATABASE_USER=${OUTLINE_DB_USER}
+      - DATABASE_PASSWORD=${OUTLINE_DB_PASSWORD}
       # App and database share a private network, so TLS between them is noise.
       - PGSSLMODE=disable
       - REDIS_URL=redis://outline-redis:6379
