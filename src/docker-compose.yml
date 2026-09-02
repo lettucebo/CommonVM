@@ -199,6 +199,9 @@ services:
       # Azure Blob is not an option.
       - FILE_STORAGE=local
       - FILE_STORAGE_LOCAL_ROOT_DIR=/var/lib/outline/data
+      # The Outline default is only 1,000,000 bytes, which silently breaks
+      # typical screenshots and remote-image imports.
+      - FILE_STORAGE_UPLOAD_MAX_SIZE=${OUTLINE_FILE_STORAGE_UPLOAD_MAX_SIZE:-10485760}
       # OIDC via the existing Entra app registration. The Azure plugin is
       # deliberately not used: it calls Graph /v1.0/organization and fails hard
       # without Organization.Read.All, which that app does not have.

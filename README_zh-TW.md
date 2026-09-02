@@ -87,6 +87,8 @@ newgrp docker
      `OUTLINE_UTILS_SECRET`。
    - Outline v1.10.0 首次建立的工作區名稱固定為 `Outline`；登入後可從
      **Settings → Details** 重新命名。
+   - 本設定的 `OUTLINE_FILE_STORAGE_UPLOAD_MAX_SIZE` 預設為 10 MiB；
+     只有在評估 VM 記憶體與磁碟容量後才提高。
    - **重要**：修改 `.env` 中的 `DATA_ROOT` 變數，將其指向您的掛載路徑 (預設：`/mnt/data`)。
 4. **設定資料夾權限**：
    由於容器內的使用者 ID (UID) 可能與主機不同，請執行以下指令修正資料夾權限，以避免 `Permission denied` 錯誤：

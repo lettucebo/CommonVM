@@ -88,6 +88,9 @@ newgrp docker
      `openssl rand -hex 32`.
    - Outline v1.10.0 initially names the workspace `Outline`; rename it after
      the first sign-in from **Settings → Details**.
+   - `OUTLINE_FILE_STORAGE_UPLOAD_MAX_SIZE` defaults to 10 MiB in this
+     configuration. Increase it only after considering VM memory and disk
+     capacity.
    - **Important**: Update `DATA_ROOT` in `.env` to point to your mounted disk path (default: `/mnt/data`).
 4. **Fix Folder Permissions**:
    Since container user IDs (UID) may differ from the host, run the following commands to fix folder permissions and avoid `Permission denied` errors:
