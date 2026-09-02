@@ -10,9 +10,12 @@
 # CodiMD
 {$CODIMD_DOMAIN} {
     reverse_proxy codimd:3000
-    
-    # 使用自簽憑證進行測試 (DNS 切換後請移除此行)
-    # tls internal
+
+    # Certificate mode, driven by CADDY_TLS in .env.
+    # Empty (default)  -> automatic Let's Encrypt certificates.
+    # "tls internal"   -> self-signed, for local/IP testing or when an upstream
+    #                     proxy terminates TLS and accepts a self-signed origin.
+    {$CADDY_TLS}
 
     # Security Headers
     header {
@@ -31,8 +34,8 @@
         header_up Host {host}
     }
 
-    # 使用自簽憑證進行測試 (DNS 切換後請移除此行)
-    # tls internal
+    # See the CADDY_TLS note above.
+    {$CADDY_TLS}
 
     # Security Headers
     header {

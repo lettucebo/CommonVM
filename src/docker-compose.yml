@@ -19,6 +19,7 @@ services:
       - n8n
     environment:
       - ACME_EMAIL=${ACME_EMAIL}
+      - CADDY_TLS=${CADDY_TLS}
       - CODIMD_DOMAIN=${CODIMD_DOMAIN}
       - N8N_DOMAIN=${N8N_DOMAIN}
     networks:

@@ -39,7 +39,8 @@ directory's path. Always confirm real names with `docker compose ps` before any
 - **Docs are bilingual.** Every `*.md` has a `*_zh-TW.md` twin (`README`, `RUSTDESK_CLIENT_DEPLOYMENT`).
   Update both when changing either.
 - The scripts folder is literally spelled `src/srcipts/` — keep paths exact, don't "correct" it.
-- `tls internal` lines in `Caddyfile` stay commented for production; only enable for local IP testing.
+- `CADDY_TLS` in `.env` controls the certificate mode: empty for automatic Let's Encrypt,
+  `tls internal` for self-signed. Never hardcode it in `Caddyfile`.
 - RustDesk client scripts (`deploy-rustdesk-client.ps1` / `.sh`) write `RustDesk2.toml`; keep the
   Windows and macOS versions in parity.
 
