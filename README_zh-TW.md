@@ -265,7 +265,23 @@ htop
    - 透過 Caddy 強制使用 HTTPS
    - 建議定期進行安全性更新
    - CodiMD 使用 Microsoft Entra ID (OAuth2) 進行驗證
+   - Outline 透過通用 OIDC 沿用**同一個** Entra 應用程式註冊
    - n8n 支援內建驗證和雙因素驗證 (2FA)
+
+4. **共用 Entra 應用程式註冊** ⚠️：
+
+   CodiMD 與 Outline 刻意共用同一個應用程式註冊，因此：
+
+   - 兩者共用同一組 client secret。**輪替時會同時中斷兩個服務**，
+     必須同步更新 `CODIMD_OAUTH2_CLIENT_SECRET` 與 `OUTLINE_OIDC_CLIENT_SECRET`。
+   - 該應用程式需同時包含兩組 redirect URI：
+     `https://<CODIMD_DOMAIN>/auth/oauth2/callback` 與
+     `https://<OUTLINE_DOMAIN>/auth/oidc.callback`
+   - **未來移除 CodiMD 時不可刪除此應用程式註冊** — Outline 仍靠它驗證。
+
+   Outline 刻意採用通用 OIDC plugin 而非其 Azure plugin：Azure plugin 會呼叫
+   Microsoft Graph `/v1.0/organization`，缺少 `Organization.Read.All`（通常需
+   管理員同意）就會直接失敗。OIDC 只需要 `openid profile email`。
 
 ## 疑難排解
 

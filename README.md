@@ -266,7 +266,26 @@ Automated backups can be configured using cron:
    - HTTPS enforced via Caddy
    - Regular security updates recommended
    - CodiMD uses Microsoft Entra ID (OAuth2) for authentication
+   - Outline uses the **same** Entra app registration via generic OIDC
    - n8n supports built-in authentication and 2FA
+
+4. **Shared Entra app registration** ⚠️:
+
+   CodiMD and Outline intentionally share one app registration, so:
+
+   - They also share one client secret. **Rotating it breaks both services**;
+     update `CODIMD_OAUTH2_CLIENT_SECRET` and `OUTLINE_OIDC_CLIENT_SECRET`
+     together.
+   - The app must carry both redirect URIs:
+     `https://<CODIMD_DOMAIN>/auth/oauth2/callback` and
+     `https://<OUTLINE_DOMAIN>/auth/oidc.callback`
+   - **Do not delete the app registration when retiring CodiMD** — Outline
+     still authenticates through it.
+
+   Outline is configured with the generic OIDC plugin rather than its Azure
+   plugin on purpose: the Azure plugin calls Microsoft Graph
+   `/v1.0/organization` and fails hard without `Organization.Read.All`, which
+   normally requires admin consent. OIDC only needs `openid profile email`.
 
 ## Troubleshooting
 
