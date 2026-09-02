@@ -14,10 +14,6 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - ${DATA_ROOT}/caddy/data:/data
       - ${DATA_ROOT}/caddy/config:/config
-    depends_on:
-      - codimd
-      - n8n
-      - outline
     environment:
       - ACME_EMAIL=${ACME_EMAIL}
       - CADDY_TLS=${CADDY_TLS}
@@ -76,7 +72,7 @@ services:
 
   # n8n Services
   n8n-db:
-    image: postgres:14-alpine
+    image: postgres:14.23-alpine
     restart: always
     environment:
       - POSTGRES_USER=${N8N_DB_USER}
@@ -107,7 +103,6 @@ services:
       - EXCHANGE_API_KEY=${N8N_EXCHANGE_API_KEY}
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
       # n8n emits large auth headers; the default 16 KB limit truncates them.
-      # Must be kept in sync with Caddy's max_header_size.
       - NODE_OPTIONS=--max-http-header-size=32768
     volumes:
       - ${DATA_ROOT}/n8n/data:/home/node/.n8n
@@ -122,8 +117,18 @@ services:
   # layout, whereas 17 keeps /var/lib/postgresql/data consistent with the two
   # databases above. Supported until 2029.
   outline-db:
-    image: postgres:17-alpine
+    image: postgres:17.11-alpine
     restart: always
+    command:
+      - postgres
+      - -c
+      - shared_buffers=96MB
+      - -c
+      - max_connections=50
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - work_mem=2MB
     environment:
       - POSTGRES_USER=${OUTLINE_DB_USER}
       - POSTGRES_PASSWORD=${OUTLINE_DB_PASSWORD}
@@ -132,17 +137,41 @@ services:
       - ${DATA_ROOT}/outline/db:/var/lib/postgresql/data
     # This host has 2 vCPU / 3.8 GiB and no spare headroom; cap each service so
     # one cannot starve the others.
-    mem_limit: 256m
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     networks:
       - backend
 
   outline-redis:
-    image: redis:8-alpine
+    image: redis:8.10.1-alpine
     restart: always
-    command: ["redis-server", "--save", "60", "1", "--maxmemory", "96mb", "--maxmemory-policy", "noeviction"]
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - "60"
+      - "1"
+      - --maxmemory
+      - 128mb
+      - --maxmemory-policy
+      - noeviction
     volumes:
       - ${DATA_ROOT}/outline/redis:/data
-    mem_limit: 128m
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
     networks:
       - backend
 
@@ -153,9 +182,6 @@ services:
       - NODE_ENV=production
       - URL=https://${OUTLINE_DOMAIN}
       - PORT=3000
-      # Names the workspace. The OIDC sign-in path derives the team name from
-      # this rather than from a directory lookup.
-      - APP_NAME=${OUTLINE_APP_NAME}
       - SECRET_KEY=${OUTLINE_SECRET_KEY}
       - UTILS_SECRET=${OUTLINE_UTILS_SECRET}
       # Database supplied as discrete components rather than a connection URL,
@@ -165,6 +191,7 @@ services:
       - DATABASE_NAME=${OUTLINE_DB_NAME}
       - DATABASE_USER=${OUTLINE_DB_USER}
       - DATABASE_PASSWORD=${OUTLINE_DB_PASSWORD}
+      - DATABASE_CONNECTION_POOL_MAX=5
       # App and database share a private network, so TLS between them is noise.
       - PGSSLMODE=disable
       - REDIS_URL=redis://outline-redis:6379
@@ -186,7 +213,6 @@ services:
       # Caddy terminates TLS and Cloudflare sits in front of it.
       - FORCE_HTTPS=false
       - PROXY_HEADERS_TRUSTED=true
-      - PROXY_IP_HEADER=CF-Connecting-IP
       # Single worker: official guidance is available memory / 512.
       - WEB_CONCURRENCY=1
       - NODE_OPTIONS=--max-old-space-size=768
@@ -194,10 +220,14 @@ services:
       - LOG_LEVEL=info
     volumes:
       - ${DATA_ROOT}/outline/data:/var/lib/outline/data
-    mem_limit: 1g
+    # Markdown ZIP import is the lifecycle memory peak; leave native/V8
+    # overhead above the 768 MB heap cap to avoid partial imports.
+    mem_limit: 1536m
     depends_on:
-      - outline-db
-      - outline-redis
+      outline-db:
+        condition: service_healthy
+      outline-redis:
+        condition: service_healthy
     networks:
       - web
       - backend

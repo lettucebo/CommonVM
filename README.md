@@ -77,7 +77,17 @@ newgrp docker
    > **Tip**: You can use `df -h` or `lsblk` to verify the mount.
 2. **Copy Files**: Transfer this directory (`src`) to your VM.
 3. **Configure Environment**: 
-   - Check `.env` and ensure all secrets are correct.
+   - Copy `.env.example` to `.env`, then replace every placeholder.
+   - `ACME_EMAIL` is required; an empty value makes Caddy reject its
+     configuration and all proxied services become unavailable.
+   - Set `CADDY_TLS` explicitly: leave it empty for automatic Let's Encrypt,
+     or use `tls internal` only when an upstream proxy accepts a self-signed
+     origin certificate.
+   - Configure all `OUTLINE_*` values before starting Outline. Generate
+     `OUTLINE_SECRET_KEY` and `OUTLINE_UTILS_SECRET` independently with
+     `openssl rand -hex 32`.
+   - Outline v1.10.0 initially names the workspace `Outline`; rename it after
+     the first sign-in from **Settings → Details**.
    - **Important**: Update `DATA_ROOT` in `.env` to point to your mounted disk path (default: `/mnt/data`).
 4. **Fix Folder Permissions**:
    Since container user IDs (UID) may differ from the host, run the following commands to fix folder permissions and avoid `Permission denied` errors:
@@ -111,31 +121,37 @@ newgrp docker
 
    Add the following:
    ```text
-   <VM_PUBLIC_IP> doc.yu.money
-   <VM_PUBLIC_IP> n8n.yu.money
+   <VM_PUBLIC_IP> <CODIMD_DOMAIN>
+   <VM_PUBLIC_IP> <N8N_DOMAIN>
+   <VM_PUBLIC_IP> <OUTLINE_DOMAIN>
    ```
 
-   **B. Temporary Self-Signed Certificate (Already Configured)**
-   I've temporarily added `tls internal` to the `Caddyfile`. This allows Caddy to issue self-signed certificates for HTTPS without DNS.
+   **B. Temporary Self-Signed Certificate**
+   Set `CADDY_TLS=tls internal` in `.env`, then run
+   `docker compose restart caddy`. This allows Caddy to issue self-signed
+   certificates before DNS is available.
    
    **C. Test Connection**
-   1. Restart Docker services: `docker compose restart`
-   2. Open `https://doc.yu.money` and `https://n8n.yu.money` in your browser.
+   1. Restart Caddy: `docker compose restart caddy`
+   2. Open `https://<CODIMD_DOMAIN>`, `https://<N8N_DOMAIN>`, and
+      `https://<OUTLINE_DOMAIN>` in your browser.
    3. Your browser will warn about an insecure connection (due to self-signed cert). Click "Advanced" and "Proceed".
-   4. Verify CodiMD and n8n functionality (login, create notes, create workflows).
+   4. Verify CodiMD, n8n, and Outline functionality.
 
    **D. Prepare for Production**
    Once everything works:
    1. Remove the hosts file entries.
    2. Point your DNS to the VM IP at your DNS provider.
-   3. Edit `src/Caddyfile` and remove the two `tls internal` lines.
-   4. Run `docker compose restart` to let Caddy obtain official Let's Encrypt certificates.
+   3. Clear `CADDY_TLS` in `.env`.
+   4. Run `docker compose restart caddy` to let Caddy obtain official
+      Let's Encrypt certificates.
 
 8. **Final Verification**:
 
    - Check logs: `docker compose logs -f`
-   - Access `https://doc.yu.money`
-   - Access `https://n8n.yu.money`
+   - Access `https://<CODIMD_DOMAIN>`
+   - Access `https://<N8N_DOMAIN>`
+   - Access `https://<OUTLINE_DOMAIN>`
 
 ## RustDesk Configuration
 
@@ -185,27 +201,20 @@ docker ps
 docker exec -t CONTAINER_NAME pg_dump -U n8n n8n > n8n_backup.sql
 ```
 
-### 2. Restore to New VM
+### 2. Verify Backups Without Overwriting Live Databases
 
 **On New VM (after starting services):**
 ```bash
-# Stop app containers
-docker compose stop codimd n8n
+# Create new, separate databases. Never drop or overwrite the live databases.
+docker exec src-codimd-db-1 createdb -U codimd codimd_restore_check
+docker exec src-n8n-db-1 createdb -U n8n n8n_restore_check
 
-# 1. Restore the CodiMD database
-# Note: the auto-initialised database must be dropped first, or the restore conflicts
-docker exec -i src-codimd-db-1 psql -U codimd -d postgres -c "DROP DATABASE codimd;"
-docker exec -i src-codimd-db-1 psql -U codimd -d postgres -c "CREATE DATABASE codimd;"
-cat codimd_backup.sql | docker exec -i src-codimd-db-1 psql -U codimd -d codimd
+# Restore into the new databases only.
+cat codimd_backup.sql | docker exec -i src-codimd-db-1 psql -U codimd -d codimd_restore_check
+cat n8n_backup.sql | docker exec -i src-n8n-db-1 psql -U n8n -d n8n_restore_check
 
-# 2. Restore the n8n database
-# Note: the auto-initialised database must be dropped first, or the restore conflicts
-docker exec -i src-n8n-db-1 psql -U n8n -d postgres -c "DROP DATABASE n8n;"
-docker exec -i src-n8n-db-1 psql -U n8n -d postgres -c "CREATE DATABASE n8n;"
-cat n8n_backup.sql | docker exec -i src-n8n-db-1 psql -U n8n -d n8n
-
-# Restart services
-docker compose start codimd n8n
+# Compare record counts with the live databases. Keep the verification
+# databases until you have explicitly approved their removal.
 ```
 
 ## Cost Estimation 💰
@@ -246,10 +255,26 @@ htop
 
 ### Backups
 
-Automated backups can be configured using cron:
+Back up all three PostgreSQL databases and Outline's local attachments. These
+commands only create new files; they do not delete or overwrite a database:
+
 ```bash
-# Add to crontab for daily backups at midnight
-(crontab -l 2>/dev/null; echo "0 0 * * * /path/to/backup.sh") | crontab -
+STAMP=$(date +%Y%m%d-%H%M%S)
+mkdir -p "/mnt/data/backup/${STAMP}"
+
+docker exec src-codimd-db-1 pg_dump -U codimd -d codimd -Fc --no-owner --no-privileges \
+  > "/mnt/data/backup/${STAMP}/codimd.dump"
+docker exec src-n8n-db-1 pg_dump -U n8n -d n8n -Fc --no-owner --no-privileges \
+  > "/mnt/data/backup/${STAMP}/n8n.dump"
+docker exec src-outline-db-1 pg_dump -U outline -d outline -Fc --no-owner --no-privileges \
+  > "/mnt/data/backup/${STAMP}/outline.dump"
+
+tar czf "/mnt/data/backup/${STAMP}/outline-data.tar.gz" \
+  -C /mnt/data/outline data
+
+# Non-destructive archive validation
+cat "/mnt/data/backup/${STAMP}/outline.dump" \
+  | docker exec -i src-outline-db-1 pg_restore --list > /dev/null
 ```
 
 ## Security Considerations 🔒
@@ -304,7 +329,7 @@ Automated backups can be configured using cron:
 - Check Caddy logs: `docker compose logs caddy`
 - Verify domain points to correct IP
 - Ensure ports 80 and 443 are open in Azure NSG
-- For local testing, use `tls internal` in Caddyfile (already configured)
+- For local testing, set `CADDY_TLS=tls internal` in `.env`, then restart Caddy
 
 ### RustDesk connection issues
 - Verify NSG rules include TCP 21114-21119 and UDP 21116
@@ -344,4 +369,3 @@ For issues:
 ## License
 
 This deployment template is MIT licensed. n8n, CodiMD, and RustDesk are licensed under their own respective terms.
-

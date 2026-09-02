@@ -77,7 +77,16 @@ newgrp docker
    > **提示**：您可以使用指令 `df -h` 或 `lsblk` 來確認掛載結果。
 2. **複製檔案**：將此目錄 (`src`) 傳輸到您的 VM。
 3. **設定環境變數**：
-   - 檢查 `.env` 檔案並確保所有密鑰 (Secrets) 正確無誤。
+   - 將 `.env.example` 複製為 `.env`，再替換所有佔位值。
+   - `ACME_EMAIL` 為必填；空值會讓 Caddy 拒絕載入設定，導致所有反向代理
+     服務無法使用。
+   - 明確設定 `CADDY_TLS`：使用自動 Let's Encrypt 時留空；只有上游代理
+     接受自簽 origin 憑證時才使用 `tls internal`。
+   - 啟動 Outline 前設定所有 `OUTLINE_*` 值，並分別使用
+     `openssl rand -hex 32` 產生 `OUTLINE_SECRET_KEY` 與
+     `OUTLINE_UTILS_SECRET`。
+   - Outline v1.10.0 首次建立的工作區名稱固定為 `Outline`；登入後可從
+     **Settings → Details** 重新命名。
    - **重要**：修改 `.env` 中的 `DATA_ROOT` 變數，將其指向您的掛載路徑 (預設：`/mnt/data`)。
 4. **設定資料夾權限**：
    由於容器內的使用者 ID (UID) 可能與主機不同，請執行以下指令修正資料夾權限，以避免 `Permission denied` 錯誤：
@@ -111,30 +120,35 @@ newgrp docker
 
    新增以下內容：
    ```text
-   <VM_PUBLIC_IP> doc.yu.money
-   <VM_PUBLIC_IP> n8n.yu.money
+   <VM_PUBLIC_IP> <CODIMD_DOMAIN>
+   <VM_PUBLIC_IP> <N8N_DOMAIN>
+   <VM_PUBLIC_IP> <OUTLINE_DOMAIN>
    ```
 
-   **B. 暫時使用自簽憑證 (已設定)**
-   我已經在 `Caddyfile` 中暫時加入了 `tls internal` 設定。這會讓 Caddy 發發自簽憑證，讓您可以在沒有 DNS 的情況下啟動 HTTPS 服務。
+   **B. 暫時使用自簽憑證**
+   在 `.env` 設定 `CADDY_TLS=tls internal`，再執行
+   `docker compose restart caddy`。這會讓 Caddy 在 DNS 尚未設定時使用自簽憑證。
    
    **C. 測試連線**
-   1. 重新啟動 Docker 服務：`docker compose restart`
-   2. 在瀏覽器開啟 `https://doc.yu.money` 和 `https://n8n.yu.money`。
+   1. 重新啟動 Caddy：`docker compose restart caddy`
+   2. 在瀏覽器開啟 `https://<CODIMD_DOMAIN>`、`https://<N8N_DOMAIN>` 與
+      `https://<OUTLINE_DOMAIN>`。
    3. 瀏覽器會警告「連線不安全」(因為是自簽憑證)，請點擊「進階」並選擇「繼續前往」。
-   4. 確認 CodiMD 和 n8n 功能正常 (登入、建立筆記、建立 Workflow)。
+   4. 確認 CodiMD、n8n 與 Outline 功能正常。
 
    **D. 準備正式上線**
    確認一切正常後：
    1. 移除本機 hosts 檔案中的設定。
    2. 在 DNS 供應商處將網域指向 VM IP。
-   3. 編輯 `src/Caddyfile`，移除 `tls internal` 那兩行設定。
-   4. 執行 `docker compose restart` 讓 Caddy 申請正式的 Let's Encrypt 憑證。
+   3. 清空 `.env` 中的 `CADDY_TLS`。
+   4. 執行 `docker compose restart caddy`，讓 Caddy 申請正式的
+      Let's Encrypt 憑證。
 
 8. **正式驗證**：
    - 檢查日誌：`docker compose logs -f`
-   - 存取 `https://doc.yu.money`
-   - 存取 `https://n8n.yu.money`
+   - 存取 `https://<CODIMD_DOMAIN>`
+   - 存取 `https://<N8N_DOMAIN>`
+   - 存取 `https://<OUTLINE_DOMAIN>`
 
 ## RustDesk 設定
 
@@ -184,27 +198,19 @@ docker ps
 docker exec -t src-postgres-1 pg_dump -U n8n n8n > n8n_backup.sql
 ```
 
-### 2. 還原至新 VM
+### 2. 在不覆蓋正式資料庫的前提下驗證備份
 
 **在新 VM 上 (啟動服務後)：**
 ```bash
-# 停止應用程式容器以防止寫入
-docker compose stop codimd n8n
+# 建立新的獨立資料庫，禁止刪除或覆蓋正式資料庫。
+docker exec src-codimd-db-1 createdb -U codimd codimd_restore_check
+docker exec src-n8n-db-1 createdb -U n8n n8n_restore_check
 
-# 1. 還原 CodiMD 資料庫
-# 注意：必須先刪除自動初始化的資料庫，否則會發生衝突
-docker exec -i src-codimd-db-1 psql -U codimd -d postgres -c "DROP DATABASE codimd;"
-docker exec -i src-codimd-db-1 psql -U codimd -d postgres -c "CREATE DATABASE codimd;"
-cat codimd_backup.sql | docker exec -i src-codimd-db-1 psql -U codimd -d codimd
+# 只還原到新資料庫。
+cat codimd_backup.sql | docker exec -i src-codimd-db-1 psql -U codimd -d codimd_restore_check
+cat n8n_backup.sql | docker exec -i src-n8n-db-1 psql -U n8n -d n8n_restore_check
 
-# 2. 還原 n8n 資料庫
-# 注意：必須先刪除自動初始化的資料庫，否則會發生衝突
-docker exec -i src-n8n-db-1 psql -U n8n -d postgres -c "DROP DATABASE n8n;"
-docker exec -i src-n8n-db-1 psql -U n8n -d postgres -c "CREATE DATABASE n8n;"
-cat n8n_backup.sql | docker exec -i src-n8n-db-1 psql -U n8n -d n8n
-
-# 重新啟動服務
-docker compose start codimd n8n
+# 將資料筆數與正式資料庫比對。驗證資料庫應保留到取得明確刪除許可為止。
 ```
 
 ## 成本估算 💰
@@ -245,10 +251,26 @@ htop
 
 ### 備份
 
-可使用 cron 設定自動備份：
+備份三套 PostgreSQL 與 Outline 本機附件。以下指令只會建立新檔案，
+不會刪除或覆蓋資料庫：
+
 ```bash
-# 加入 crontab，每天午夜執行備份
-(crontab -l 2>/dev/null; echo "0 0 * * * /path/to/backup.sh") | crontab -
+STAMP=$(date +%Y%m%d-%H%M%S)
+mkdir -p "/mnt/data/backup/${STAMP}"
+
+docker exec src-codimd-db-1 pg_dump -U codimd -d codimd -Fc --no-owner --no-privileges \
+  > "/mnt/data/backup/${STAMP}/codimd.dump"
+docker exec src-n8n-db-1 pg_dump -U n8n -d n8n -Fc --no-owner --no-privileges \
+  > "/mnt/data/backup/${STAMP}/n8n.dump"
+docker exec src-outline-db-1 pg_dump -U outline -d outline -Fc --no-owner --no-privileges \
+  > "/mnt/data/backup/${STAMP}/outline.dump"
+
+tar czf "/mnt/data/backup/${STAMP}/outline-data.tar.gz" \
+  -C /mnt/data/outline data
+
+# 非破壞性驗證 archive
+cat "/mnt/data/backup/${STAMP}/outline.dump" \
+  | docker exec -i src-outline-db-1 pg_restore --list > /dev/null
 ```
 
 ## 安全性考量 🔒
@@ -300,7 +322,7 @@ htop
 - 檢查 Caddy 日誌：`docker compose logs caddy`
 - 驗證網域是否指向正確的 IP
 - 確保 Azure NSG 中的 80 和 443 埠已開啟
-- 本機測試時，使用 Caddyfile 中的 `tls internal` (已設定)
+- 本機測試時，在 `.env` 設定 `CADDY_TLS=tls internal`，再重新啟動 Caddy
 
 ### RustDesk 連線問題
 - 確認 NSG 規則包含 TCP 21114-21119 和 UDP 21116
@@ -340,4 +362,3 @@ htop
 ## 授權
 
 此部署範本採用 MIT 授權。n8n、CodiMD 和 RustDesk 各自採用其各自的授權條款。
-
