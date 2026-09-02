@@ -1,10 +1,11 @@
 # Common Services
 
-This setup combines CodiMD, n8n, and RustDesk onto a single VM using Docker Compose and Caddy as a reverse proxy.
+This setup combines CodiMD, Outline, n8n, and RustDesk onto a single VM using Docker Compose and Caddy as a reverse proxy.
 
 > **Note**: This project merges multiple deployments:
 > - [n8n-azure-vm-starter](https://github.com/lettucebo/n8n-azure-vm-starter) - n8n workflow automation
 > - [CodiMD-Doc](https://github.com/lettucebo/CodiMD-Doc) - Collaborative markdown editor
+> - [Outline](https://github.com/outline/outline) - Team knowledge base, being introduced to replace CodiMD
 > - [RustDesk Server](https://github.com/rustdesk/rustdesk-server) - Self-hosted remote desktop relay
 
 ## Prerequisites
@@ -12,9 +13,10 @@ This setup combines CodiMD, n8n, and RustDesk onto a single VM using Docker Comp
 - Azure VM (Ubuntu recommended)
 - Docker and Docker Compose installed
 - Public IP address
-- DNS records pointing to the VM IP:
-  - `doc.yu.money`
-  - `n8n.yu.money`
+- DNS records pointing to the VM IP, one per service (see `.env`):
+  - CodiMD (`CODIMD_DOMAIN`)
+  - n8n (`N8N_DOMAIN`)
+  - Outline (`OUTLINE_DOMAIN`)
 - Ports open in Azure Network Security Group (NSG):
   - **80, 443** (HTTP/HTTPS for Caddy)
   - **21114-21119 TCP** (RustDesk)
@@ -86,6 +88,10 @@ newgrp docker
 
    # Fix CodiMD folder permissions (UID 1500)
    sudo chown -R 1500:1500 /mnt/data/codimd
+
+   # Fix Outline folder permissions (UID 1001, the image's "nodejs" user)
+   sudo mkdir -p /mnt/data/outline/data /mnt/data/outline/db /mnt/data/outline/redis
+   sudo chown -R 1001:1001 /mnt/data/outline/data
    ```
 5. **Create RustDesk Data Directory**:
    ```bash

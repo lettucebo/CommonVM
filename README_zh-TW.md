@@ -1,10 +1,11 @@
-# CodiMD、n8n 與 RustDesk 合併服務
+# CodiMD、Outline、n8n 與 RustDesk 合併服務
 
-此設定使用 Docker Compose 和 Caddy 作為反向代理，將 CodiMD、n8n 和 RustDesk 合併到單一 VM 上。
+此設定使用 Docker Compose 和 Caddy 作為反向代理，將 CodiMD、Outline、n8n 和 RustDesk 合併到單一 VM 上。
 
 > **說明**：此專案合併了多個部署：
 > - [n8n-azure-vm-starter](https://github.com/lettucebo/n8n-azure-vm-starter) - n8n 工作流程自動化
 > - [CodiMD-Doc](https://github.com/lettucebo/CodiMD-Doc) - 協作式 Markdown 編輯器
+> - [Outline](https://github.com/outline/outline) - 團隊知識庫，導入中，未來取代 CodiMD
 > - [RustDesk Server](https://github.com/rustdesk/rustdesk-server) - 自架遠端桌面中繼伺服器
 
 ## 前置需求
@@ -12,9 +13,10 @@
 - Azure VM (推薦使用 Ubuntu)
 - 已安裝 Docker 和 Docker Compose
 - 公用 IP 位址
-- 指向 VM IP 的 DNS 紀錄：
-  - `doc.yu.money`
-  - `n8n.yu.money`
+- 指向 VM IP 的 DNS 紀錄，每個服務各一筆 (詳見 `.env`)：
+  - CodiMD (`CODIMD_DOMAIN`)
+  - n8n (`N8N_DOMAIN`)
+  - Outline (`OUTLINE_DOMAIN`)
 - Azure 網路安全性群組 (NSG) 已開啟以下 Port：
   - **80, 443** (HTTP/HTTPS，供 Caddy 使用)
   - **21114-21119 TCP** (RustDesk)
@@ -86,6 +88,10 @@ newgrp docker
 
    # 修正 CodiMD 上傳資料夾權限 (UID 1500)
    sudo chown -R 1500:1500 /mnt/data/codimd
+
+   # 修正 Outline 資料夾權限 (UID 1001，即映像檔內的 nodejs 使用者)
+   sudo mkdir -p /mnt/data/outline/data /mnt/data/outline/db /mnt/data/outline/redis
+   sudo chown -R 1001:1001 /mnt/data/outline/data
    ```
 5. **建立 RustDesk 資料目錄**：
    ```bash

@@ -17,11 +17,13 @@ services:
     depends_on:
       - codimd
       - n8n
+      - outline
     environment:
       - ACME_EMAIL=${ACME_EMAIL}
       - CADDY_TLS=${CADDY_TLS}
       - CODIMD_DOMAIN=${CODIMD_DOMAIN}
       - N8N_DOMAIN=${N8N_DOMAIN}
+      - OUTLINE_DOMAIN=${OUTLINE_DOMAIN}
     networks:
       - web
 
@@ -111,6 +113,85 @@ services:
       - ${DATA_ROOT}/n8n/data:/home/node/.n8n
     depends_on:
       - n8n-db
+    networks:
+      - web
+      - backend
+
+  # Outline Services
+  # PostgreSQL 17 rather than 18: 18 relocates PGDATA and changes the volume
+  # layout, whereas 17 keeps /var/lib/postgresql/data consistent with the two
+  # databases above. Supported until 2029.
+  outline-db:
+    image: postgres:17-alpine
+    restart: always
+    environment:
+      - POSTGRES_USER=${OUTLINE_DB_USER}
+      - POSTGRES_PASSWORD=${OUTLINE_DB_PASSWORD}
+      - POSTGRES_DB=${OUTLINE_DB_NAME}
+    volumes:
+      - ${DATA_ROOT}/outline/db:/var/lib/postgresql/data
+    # This host has 2 vCPU / 3.8 GiB and no spare headroom; cap each service so
+    # one cannot starve the others.
+    mem_limit: 256m
+    networks:
+      - backend
+
+  outline-redis:
+    image: redis:8-alpine
+    restart: always
+    command: ["redis-server", "--save", "60", "1", "--maxmemory", "96mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - ${DATA_ROOT}/outline/redis:/data
+    mem_limit: 128m
+    networks:
+      - backend
+
+  outline:
+    image: docker.getoutline.com/outlinewiki/outline:1.10.0
+    restart: always
+    environment:
+      - NODE_ENV=production
+      - URL=https://${OUTLINE_DOMAIN}
+      - PORT=3000
+      # Names the workspace. The OIDC sign-in path derives the team name from
+      # this rather than from a directory lookup.
+      - APP_NAME=${OUTLINE_APP_NAME}
+      - SECRET_KEY=${OUTLINE_SECRET_KEY}
+      - UTILS_SECRET=${OUTLINE_UTILS_SECRET}
+      - DATABASE_URL=******outline-db:5432/${OUTLINE_DB_NAME}
+      # App and database share a private network, so TLS between them is noise.
+      - PGSSLMODE=disable
+      - REDIS_URL=redis://outline-redis:6379
+      # Attachments on local disk. Outline supports only "local" or "s3";
+      # Azure Blob is not an option.
+      - FILE_STORAGE=local
+      - FILE_STORAGE_LOCAL_ROOT_DIR=/var/lib/outline/data
+      # OIDC via the existing Entra app registration. The Azure plugin is
+      # deliberately not used: it calls Graph /v1.0/organization and fails hard
+      # without Organization.Read.All, which that app does not have.
+      - OIDC_CLIENT_ID=${OUTLINE_OIDC_CLIENT_ID}
+      - OIDC_CLIENT_SECRET=${OUTLINE_OIDC_CLIENT_SECRET}
+      - OIDC_AUTH_URI=${OUTLINE_OIDC_AUTH_URI}
+      - OIDC_TOKEN_URI=${OUTLINE_OIDC_TOKEN_URI}
+      - OIDC_USERINFO_URI=${OUTLINE_OIDC_USERINFO_URI}
+      - OIDC_USERNAME_CLAIM=${OUTLINE_OIDC_USERNAME_CLAIM:-preferred_username}
+      - OIDC_DISPLAY_NAME=${OUTLINE_OIDC_DISPLAY_NAME:-Entra ID}
+      - OIDC_SCOPES=${OUTLINE_OIDC_SCOPES:-openid profile email}
+      # Caddy terminates TLS and Cloudflare sits in front of it.
+      - FORCE_HTTPS=false
+      - PROXY_HEADERS_TRUSTED=true
+      - PROXY_IP_HEADER=CF-Connecting-IP
+      # Single worker: official guidance is available memory / 512.
+      - WEB_CONCURRENCY=1
+      - NODE_OPTIONS=--max-old-space-size=768
+      - RATE_LIMITER_ENABLED=true
+      - LOG_LEVEL=info
+    volumes:
+      - ${DATA_ROOT}/outline/data:/var/lib/outline/data
+    mem_limit: 1g
+    depends_on:
+      - outline-db
+      - outline-redis
     networks:
       - web
       - backend
