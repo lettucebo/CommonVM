@@ -69,7 +69,7 @@ newgrp docker
    # 取得 UUID
    sudo blkid /dev/sdc
    # 將 UUID 加入 /etc/fstab (請將 <UUID> 替換為實際輸出的 UUID)
-   echo "UUID=fd1a2678-231e-4a99-925d-d73498e488fa /mnt/data xfs defaults,nofail 0 2" | sudo tee -a /etc/fstab
+   echo "UUID=<YOUR_DISK_UUID> /mnt/data xfs defaults,nofail 0 2" | sudo tee -a /etc/fstab
    ```
 
    > **提示**：您可以使用指令 `df -h` 或 `lsblk` 來確認掛載結果。

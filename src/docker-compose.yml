@@ -16,6 +16,7 @@ services:
       - codimd
       - n8n
     environment:
+      - ACME_EMAIL=${ACME_EMAIL}
       - CODIMD_DOMAIN=${CODIMD_DOMAIN}
       - N8N_DOMAIN=${N8N_DOMAIN}
     networks:

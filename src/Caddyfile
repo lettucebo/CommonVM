@@ -1,5 +1,5 @@
 {
-    email money.yu@yu.money
+    email {$ACME_EMAIL}
 }
 
 # CodiMD
