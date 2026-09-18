@@ -282,7 +282,7 @@ unset FOUNDRY_KEY BASE_URL
 請在 Cloudflare Zero Trust dashboard 建立 **remotely managed** tunnel。
 
 1. 在 Zero Trust 建立 tunnel。
-2. 新增 public hostname，hostname 欄位只填 `<OPENWEBUI_DOMAIN>`（例如 `openweb.yu.money`），再另外把 service target 設成 `http://open-webui:8080`。如果介面另外要求選 protocol，請在那裡選 `HTTP`，不要在 hostname 欄位輸入 `https://`。
+2. 新增 public hostname，hostname 欄位只填 `<OPENWEBUI_DOMAIN>`（例如 `openwebui.example.com`），再另外把 service target 設成 `http://open-webui:8080`。如果介面另外要求選 protocol，請在那裡選 `HTTP`，不要在 hostname 欄位輸入 `https://`。
 3. 只複製一次 tunnel token，填入 `src/.env` 的 `CLOUDFLARED_TUNNEL_TOKEN`。這個 token 是 secret。
 4. DNS 必須維持 tunnel-managed **CNAME**，**不要**把此 hostname 建成指向 VM public IP 的 `A` record。
 5. 針對同一個 hostname 建立 **self-hosted** 的 Cloudflare Access application，並新增只允許目標 Entra 使用者或群組的 **Allow** policy。
