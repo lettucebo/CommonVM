@@ -285,7 +285,7 @@ That example is only a template; it does **not** imply this repository has teste
 Create a **remotely managed** tunnel in the Cloudflare Zero Trust dashboard.
 
 1. Create the tunnel in Zero Trust.
-2. Add a public hostname for `https://<OPENWEBUI_DOMAIN>` that routes to `http://open-webui:8080`.
+2. Add a public hostname for `<OPENWEBUI_DOMAIN>` (for example, `openweb.yu.money`), then set the service target separately to `http://open-webui:8080` in the dashboard. If the UI asks for a protocol, choose `HTTP` there rather than typing `https://` into the hostname field.
 3. Copy the tunnel token once into `CLOUDFLARED_TUNNEL_TOKEN` in `src/.env`. The token is secret.
 4. Keep DNS as the tunnel-managed **CNAME**. Do **not** create an `A` record from the hostname to the VM public IP.
 5. Create a **self-hosted** Cloudflare Access application for the same hostname and add an **Allow** policy for the intended Entra users or groups.
@@ -510,6 +510,8 @@ htop
 Back up all three PostgreSQL databases, Outline's local attachments, and Open WebUI's local data. These commands create timestamped files and do not overwrite prior backups.
 
 ```bash
+# Run from the Compose project directory so docker compose can find docker-compose.yml.
+cd /path/to/CommonVM/src
 STAMP=$(date +%Y%m%d-%H%M%S)
 mkdir -p "/mnt/data/backup/${STAMP}"
 

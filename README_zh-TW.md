@@ -282,7 +282,7 @@ unset FOUNDRY_KEY BASE_URL
 請在 Cloudflare Zero Trust dashboard 建立 **remotely managed** tunnel。
 
 1. 在 Zero Trust 建立 tunnel。
-2. 新增 public hostname，把 `https://<OPENWEBUI_DOMAIN>` 導到 `http://open-webui:8080`。
+2. 新增 public hostname，hostname 欄位只填 `<OPENWEBUI_DOMAIN>`（例如 `openweb.yu.money`），再另外把 service target 設成 `http://open-webui:8080`。如果介面另外要求選 protocol，請在那裡選 `HTTP`，不要在 hostname 欄位輸入 `https://`。
 3. 只複製一次 tunnel token，填入 `src/.env` 的 `CLOUDFLARED_TUNNEL_TOKEN`。這個 token 是 secret。
 4. DNS 必須維持 tunnel-managed **CNAME**，**不要**把此 hostname 建成指向 VM public IP 的 `A` record。
 5. 針對同一個 hostname 建立 **self-hosted** 的 Cloudflare Access application，並新增只允許目標 Entra 使用者或群組的 **Allow** policy。
@@ -506,6 +506,8 @@ htop
 備份三套 PostgreSQL、Outline 本機附件，以及 Open WebUI 本機資料。以下指令會建立帶時間戳記的新檔，不會覆蓋既有備份。
 
 ```bash
+# 先切到 Compose 專案目錄，讓 docker compose 能找到 docker-compose.yml。
+cd /path/to/CommonVM/src
 STAMP=$(date +%Y%m%d-%H%M%S)
 mkdir -p "/mnt/data/backup/${STAMP}"
 
