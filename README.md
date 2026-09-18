@@ -292,6 +292,8 @@ Create a **remotely managed** tunnel in the Cloudflare Zero Trust dashboard.
 
 Tunnel traffic is outbound-only from the VM. Neither `open-webui` nor `cloudflared` publishes a host port, which prevents direct-origin bypass for this hostname and does not interfere with the existing Caddy-published sites. This hostname currently depends on a single tunnel connector; `restart: always` helps recover the `cloudflared` process, and `docker compose logs cloudflared` is the first place to check if the route disappears.
 
+Compose restricts Open WebUI HTTP and Socket.IO CORS to `https://${OPENWEBUI_DOMAIN}`. Open WebUI v0.11.3 may still log a misleading warning that Microsoft logout requires `OPENID_PROVIDER_URL` or `OPENID_END_SESSION_ENDPOINT`; the built-in Microsoft provider already uses tenant-specific OpenID discovery, and the logout route resolves that provider metadata. Do not add a custom logout endpoint only to silence the warning, because that path omits the normal `id_token_hint` handling. Verify logout through the real Access and Microsoft sign-in flow before changing the OAuth configuration.
+
 Authoritative references:
 
 - <https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/>

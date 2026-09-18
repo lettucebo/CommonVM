@@ -289,6 +289,8 @@ unset FOUNDRY_KEY BASE_URL
 
 Tunnel 從 VM 發出的是 outbound-only 連線。`open-webui` 與 `cloudflared` 都不會對 host 發布 port，這可避免此 hostname 被 direct-origin bypass，也不會干擾既有由 Caddy 發布的站點。目前這個 hostname 依賴單一 tunnel connector；`restart: always` 可協助 `cloudflared` 行程自動復原，而 `docker compose logs cloudflared` 是路由失效時的第一個檢查點。
 
+Compose 會將 Open WebUI HTTP 與 Socket.IO 的 CORS 限制為 `https://${OPENWEBUI_DOMAIN}`。Open WebUI v0.11.3 仍可能顯示誤導性警告，聲稱 Microsoft logout 必須設定 `OPENID_PROVIDER_URL` 或 `OPENID_END_SESSION_ENDPOINT`；內建 Microsoft provider 實際上已使用 tenant-specific OpenID discovery，logout route 也會解析該 provider metadata。不要只為了消除警告而新增自訂 logout endpoint，因為那條路徑會略過正常的 `id_token_hint` 處理。調整 OAuth 設定前，應先透過真實的 Access 與 Microsoft 登入流程驗證 logout。
+
 權威文件：
 
 - <https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/>
