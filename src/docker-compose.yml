@@ -235,6 +235,57 @@ services:
       - web
       - backend
 
+  # Open WebUI
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:v0.11.3
+    restart: always
+    environment:
+      - WEBUI_URL=https://${OPENWEBUI_DOMAIN}
+      - WEBUI_SECRET_KEY=${OPENWEBUI_SECRET_KEY}
+      - ENABLE_PERSISTENT_CONFIG=false
+      - ENABLE_OAUTH_PERSISTENT_CONFIG=false
+      - ENABLE_LOGIN_FORM=false
+      - ENABLE_SIGNUP=false
+      - ENABLE_PASSWORD_AUTH=false
+      - ENABLE_PASSWORD_CHANGE_FORM=false
+      - ENABLE_OAUTH_SIGNUP=${OPENWEBUI_ENABLE_OAUTH_SIGNUP}
+      - MICROSOFT_CLIENT_ID=${OPENWEBUI_MICROSOFT_CLIENT_ID}
+      - MICROSOFT_CLIENT_SECRET=${OPENWEBUI_MICROSOFT_CLIENT_SECRET}
+      - MICROSOFT_CLIENT_TENANT_ID=${OPENWEBUI_MICROSOFT_CLIENT_TENANT_ID}
+      - MICROSOFT_REDIRECT_URI=https://${OPENWEBUI_DOMAIN}/oauth/microsoft/callback
+      - ENABLE_OPENAI_API=true
+      - ENABLE_OLLAMA_API=false
+      - OPENAI_API_BASE_URL=${OPENWEBUI_FOUNDRY_BASE_URL}
+      - OPENAI_API_KEY=${OPENWEBUI_FOUNDRY_API_KEY}
+      - DEFAULT_MODELS=${OPENWEBUI_FOUNDRY_CHAT_MODEL}
+      - STORAGE_PROVIDER=azure
+      - AZURE_STORAGE_ENDPOINT=${OPENWEBUI_AZURE_STORAGE_ENDPOINT}
+      - AZURE_STORAGE_CONTAINER_NAME=${OPENWEBUI_AZURE_STORAGE_CONTAINER_NAME}
+      - AZURE_STORAGE_KEY=${OPENWEBUI_AZURE_STORAGE_KEY}
+      - RAG_EMBEDDING_ENGINE=openai
+      - RAG_OPENAI_API_BASE_URL=${OPENWEBUI_RAG_OPENAI_BASE_URL}
+      - RAG_OPENAI_API_KEY=${OPENWEBUI_RAG_OPENAI_API_KEY}
+      - RAG_EMBEDDING_MODEL=${OPENWEBUI_RAG_EMBEDDING_MODEL}
+      - RAG_EMBEDDING_MODEL_AUTO_UPDATE=false
+    volumes:
+      - ${DATA_ROOT}/open-webui/data:/app/backend/data
+    mem_limit: ${OPENWEBUI_MEM_LIMIT:-1024m}
+    networks:
+      - web
+
+  # Cloudflare Tunnel
+  cloudflared:
+    image: cloudflare/cloudflared:2026.9.1
+    restart: always
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+      - --token
+      - ${CLOUDFLARED_TUNNEL_TOKEN}
+    networks:
+      - web
+
   # RustDesk Self-Hosted Server
   rustdesk-hbbs:
     image: rustdesk/rustdesk-server:latest
