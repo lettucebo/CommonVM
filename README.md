@@ -1,26 +1,35 @@
 # Common Services
 
-This setup combines CodiMD, Outline, n8n, and RustDesk onto a single VM using Docker Compose and Caddy as a reverse proxy.
+This setup combines CodiMD, Outline, n8n, Open WebUI, Cloudflare Tunnel, and RustDesk onto a single VM using Docker Compose. Caddy remains the reverse proxy for CodiMD, n8n, and Outline only.
 
 > **Note**: This project merges multiple deployments:
 > - [n8n-azure-vm-starter](https://github.com/lettucebo/n8n-azure-vm-starter) - n8n workflow automation
 > - [CodiMD-Doc](https://github.com/lettucebo/CodiMD-Doc) - Collaborative markdown editor
 > - [Outline](https://github.com/outline/outline) - Team knowledge base, being introduced to replace CodiMD
+> - [Open WebUI](https://github.com/open-webui/open-webui) - Self-hosted chat and RAG UI, published through a dedicated Cloudflare Tunnel
 > - [RustDesk Server](https://github.com/rustdesk/rustdesk-server) - Self-hosted remote desktop relay
+
+> **Open WebUI publishing model**: Open WebUI is **not** routed by Caddy. It is published through a dedicated Cloudflare Tunnel and protected by Cloudflare Access, so no additional inbound NSG port is required and the existing Caddy routes stay unchanged.
 
 ## Prerequisites
 
 - Azure VM (Ubuntu recommended)
 - Docker and Docker Compose installed
-- Public IP address
-- DNS records pointing to the VM IP, one per service (see `.env`):
+- Public IP address for the Caddy and RustDesk surfaces
+- DNS records pointing to the VM IP, one per Caddy-routed service (see `.env`):
   - CodiMD (`CODIMD_DOMAIN`)
   - n8n (`N8N_DOMAIN`)
   - Outline (`OUTLINE_DOMAIN`)
+- Cloudflare Zero Trust account and active zone for the dedicated Open WebUI hostname (`OPENWEBUI_DOMAIN`)
+- Microsoft Entra tenant for a **dedicated** Open WebUI app registration
+- Microsoft Foundry chat and embedding deployments reachable through an OpenAI-compatible `/openai/v1` base URL
+- Dedicated Azure Storage Account and private Blob container for Open WebUI uploads
 - Ports open in Azure Network Security Group (NSG):
   - **80, 443** (HTTP/HTTPS for Caddy)
   - **21114-21119 TCP** (RustDesk)
   - **21116 UDP** (RustDesk)
+
+> **Cloudflare upload limit**: Cloudflare documents a **100 MB** maximum proxied request body on Free and Pro plans. Check the current limits before enabling large uploads: <https://developers.cloudflare.com/workers/platform/limits/>
 
 ## Install Docker (Ubuntu 24.04 LTS)
 
@@ -76,7 +85,7 @@ newgrp docker
 
    > **Tip**: You can use `df -h` or `lsblk` to verify the mount.
 2. **Copy Files**: Transfer this directory (`src`) to your VM.
-3. **Configure Environment**: 
+3. **Configure Environment**:
    - Copy `.env.example` to `.env`, then replace every placeholder.
    - `ACME_EMAIL` is required; an empty value makes Caddy reject its
      configuration and all proxied services become unavailable.
@@ -91,6 +100,8 @@ newgrp docker
    - `OUTLINE_FILE_STORAGE_UPLOAD_MAX_SIZE` defaults to 10 MiB in this
      configuration. Increase it only after considering VM memory and disk
      capacity.
+   - Configure every `OPENWEBUI_*` and `CLOUDFLARED_*` placeholder before the
+     first Open WebUI boot.
    - **Important**: Update `DATA_ROOT` in `.env` to point to your mounted disk path (default: `/mnt/data`).
 4. **Fix Folder Permissions**:
    Since container user IDs (UID) may differ from the host, run the following commands to fix folder permissions and avoid `Permission denied` errors:
@@ -133,7 +144,7 @@ newgrp docker
    Set `CADDY_TLS=tls internal` in `.env`, then run
    `docker compose restart caddy`. This allows Caddy to issue self-signed
    certificates before DNS is available.
-   
+
    **C. Test Connection**
    1. Restart Caddy: `docker compose restart caddy`
    2. Open `https://<CODIMD_DOMAIN>`, `https://<N8N_DOMAIN>`, and
@@ -155,6 +166,206 @@ newgrp docker
    - Access `https://<CODIMD_DOMAIN>`
    - Access `https://<N8N_DOMAIN>`
    - Access `https://<OUTLINE_DOMAIN>`
+
+## Open WebUI Deployment (Cloudflare Tunnel + Microsoft Entra ID)
+
+All commands in this section run from `src/`.
+
+### Capacity gate before enabling
+
+Check actual headroom before you enable Open WebUI:
+
+```bash
+cd src
+free -h
+df -h
+docker stats --no-stream
+```
+
+`OPENWEBUI_MEM_LIMIT` defaults to `1024m` in `src/.env.example`, and Compose applies `mem_limit: ${OPENWEBUI_MEM_LIMIT:-1024m}`. Treat that as a **safety limit**, not proof that the VM has enough spare RAM. Do **not** reduce the existing service limits to squeeze Open WebUI onto the host. If the VM cannot preserve operating-system headroom plus the current workloads, stop here and resize or discuss the deployment instead of forcing it.
+
+### Azure Storage provisioning (Azure PowerShell)
+
+Use a dedicated storage account for Open WebUI uploads. The account key is a secret; never print it into transcripts unnecessarily and never commit it to Git.
+
+```powershell
+$SubscriptionName = '<approved-subscription-name>'
+$Location = '<same-region-as-vm-or-approved-region>'
+$ResourceGroupName = '<approved-resource-group>'
+$StorageAccountName = '<globally-unique-lowercase-name>'
+$ContainerName = 'openwebui'
+
+Get-AzSubscription -SubscriptionName $SubscriptionName
+Set-AzContext -SubscriptionName $SubscriptionName
+Get-AzContext
+
+$StorageAccount = New-AzStorageAccount `
+  -ResourceGroupName $ResourceGroupName `
+  -Name $StorageAccountName `
+  -Location $Location `
+  -SkuName Standard_LRS `
+  -Kind StorageV2 `
+  -AccessTier Hot `
+  -AllowBlobPublicAccess $false
+
+$Context = $StorageAccount.Context
+New-AzStorageContainer -Name $ContainerName -Context $Context -Permission Off
+
+$StorageEndpoint = $StorageAccount.PrimaryEndpoints.Blob.ToString().TrimEnd('/')
+$StorageKey = Get-AzStorageAccountKey `
+  -ResourceGroupName $ResourceGroupName `
+  -Name $StorageAccountName `
+  | Select-Object -First 1 -ExpandProperty Value
+
+# Paste the values privately into src/.env, then clear the key from the shell.
+# OPENWEBUI_AZURE_STORAGE_ENDPOINT=$StorageEndpoint
+# OPENWEBUI_AZURE_STORAGE_CONTAINER_NAME=$ContainerName
+# OPENWEBUI_AZURE_STORAGE_KEY=$StorageKey
+Remove-Variable StorageKey
+```
+
+Use an approved subscription or resource group only; do **not** aim this at any temporary lab subscription. `OPENWEBUI_AZURE_STORAGE_ENDPOINT` must stay in the Azure Blob endpoint form `https://<storage-account>.blob.core.windows.net`, `OPENWEBUI_AZURE_STORAGE_CONTAINER_NAME` must be `openwebui`, and `OPENWEBUI_AZURE_STORAGE_KEY` must be handled as a secret in `.env` or an approved secret manager.
+
+### Dedicated Entra app registration
+
+Use a **dedicated** app registration for Open WebUI; do not reuse the shared CodiMD/Outline registration.
+
+1. In the [Microsoft Entra admin center](https://entra.microsoft.com), go to **Entra ID** → **App registrations** → **New registration**.
+2. Set a dedicated display name such as `Open WebUI - Production`.
+3. Under **Supported account types**, choose **Single tenant only - <your tenant>**.
+4. Add a **Web** redirect URI of `https://<OPENWEBUI_DOMAIN>/oauth/microsoft/callback`.
+5. Register the app, then record:
+   - **Application (client) ID** → `OPENWEBUI_MICROSOFT_CLIENT_ID`
+   - **Directory (tenant) ID** → `OPENWEBUI_MICROSOFT_CLIENT_TENANT_ID`
+6. Go to **Certificates & secrets** → **New client secret**, copy the **Value** immediately, and store it only in `OPENWEBUI_MICROSOFT_CLIENT_SECRET` inside `src/.env` or an approved secret manager. You will not be able to read that secret value again later.
+7. Confirm **Authentication** still shows the exact redirect URI `https://<OPENWEBUI_DOMAIN>/oauth/microsoft/callback`.
+8. Verify the tenant has the matching enterprise application (service principal). If your tenant does not create it automatically, create it once with verified Az PowerShell:
+
+   ```powershell
+   New-AzADServicePrincipal -ApplicationId '<OPENWEBUI_MICROSOFT_CLIENT_ID>'
+   ```
+
+For basic OpenID `openid profile email` sign-in, you do **not** need Microsoft Graph **application** permissions. Do not grant broad directory permissions just to make basic sign-in work.
+
+### Microsoft Foundry
+
+Open WebUI is configured against OpenAI-compatible v1 endpoints. The accepted base URL formats are:
+
+- `https://<resource>.openai.azure.com/openai/v1`
+- `https://<resource>.services.ai.azure.com/openai/v1`
+
+Do **not** add `/models` to either `.env` base URL. The base URL stops at `/openai/v1`; one-off test requests may append a request path such as `/models`, but the environment variable itself must not.
+
+Map your chat and embedding deployments to the exact Task 1 variables:
+
+- `OPENWEBUI_FOUNDRY_BASE_URL` → v1 base URL for the chat model endpoint
+- `OPENWEBUI_FOUNDRY_API_KEY` → API key for that endpoint
+- `OPENWEBUI_FOUNDRY_CHAT_MODEL` → the deployed chat model name
+- `OPENWEBUI_RAG_OPENAI_BASE_URL` → v1 base URL for embeddings
+- `OPENWEBUI_RAG_OPENAI_API_KEY` → API key for embeddings
+- `OPENWEBUI_RAG_EMBEDDING_MODEL` → the deployed embedding model name
+
+If one Foundry resource and key serve both chat and embeddings, duplicate the values intentionally in both variable groups so the Compose file stays explicit.
+
+This is a secret-safe validation template you can run manually without pasting the key into shell history:
+
+```bash
+read -rsp "Foundry API key: " FOUNDRY_KEY && echo
+BASE_URL="https://<resource>.services.ai.azure.com/openai/v1"
+curl -fsS "${BASE_URL}/models" \
+  -H "api-key: ${FOUNDRY_KEY}" \
+  | python -m json.tool | sed -n '1,40p'
+unset FOUNDRY_KEY BASE_URL
+```
+
+That example is only a template; it does **not** imply this repository has tested your live endpoint.
+
+### Cloudflare Tunnel and Access
+
+Create a **remotely managed** tunnel in the Cloudflare Zero Trust dashboard.
+
+1. Create the tunnel in Zero Trust.
+2. Add a public hostname for `https://<OPENWEBUI_DOMAIN>` that routes to `http://open-webui:8080`.
+3. Copy the tunnel token once into `CLOUDFLARED_TUNNEL_TOKEN` in `src/.env`. The token is secret.
+4. Keep DNS as the tunnel-managed **CNAME**. Do **not** create an `A` record from the hostname to the VM public IP.
+5. Create a **self-hosted** Cloudflare Access application for the same hostname and add an **Allow** policy for the intended Entra users or groups.
+
+Tunnel traffic is outbound-only from the VM. Neither `open-webui` nor `cloudflared` publishes a host port, which prevents direct-origin bypass for this hostname and does not interfere with the existing Caddy-published sites. This hostname currently depends on a single tunnel connector; `restart: always` helps recover the `cloudflared` process, and `docker compose logs cloudflared` is the first place to check if the route disappears.
+
+Authoritative references:
+
+- <https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/>
+- <https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/>
+
+### First boot and verification
+
+Create the Open WebUI data directory on the Azure data disk before the first start:
+
+```bash
+sudo install -d -m 0750 /mnt/data/open-webui/data
+```
+
+Open WebUI image `ghcr.io/open-webui/open-webui:v0.11.3` runs as UID/GID `0` by default, so no service-specific `chown` is required here. The directory still should not be world-writable.
+
+Then prepare the first boot:
+
+1. From `src/`, copy `.env.example` to `.env` if you have not already done so.
+2. Fill every Open WebUI and Cloudflare placeholder before starting:
+   - `OPENWEBUI_DOMAIN`
+   - `OPENWEBUI_MEM_LIMIT`
+   - `OPENWEBUI_SECRET_KEY`
+   - `OPENWEBUI_ENABLE_OAUTH_SIGNUP`
+   - `OPENWEBUI_MICROSOFT_CLIENT_ID`
+   - `OPENWEBUI_MICROSOFT_CLIENT_SECRET`
+   - `OPENWEBUI_MICROSOFT_CLIENT_TENANT_ID`
+   - `OPENWEBUI_FOUNDRY_BASE_URL`
+   - `OPENWEBUI_FOUNDRY_API_KEY`
+   - `OPENWEBUI_FOUNDRY_CHAT_MODEL`
+   - `OPENWEBUI_AZURE_STORAGE_ENDPOINT`
+   - `OPENWEBUI_AZURE_STORAGE_CONTAINER_NAME`
+   - `OPENWEBUI_AZURE_STORAGE_KEY`
+   - `OPENWEBUI_RAG_OPENAI_BASE_URL`
+   - `OPENWEBUI_RAG_OPENAI_API_KEY`
+   - `OPENWEBUI_RAG_EMBEDDING_MODEL`
+   - `CLOUDFLARED_TUNNEL_TOKEN`
+3. Leave `ENABLE_PERSISTENT_CONFIG=false` in place. In this mode, environment variables remain authoritative; Admin UI configuration edits may appear editable but do not persist across restart.
+4. Leave `OPENWEBUI_ENABLE_OAUTH_SIGNUP=true` for the first authorized OAuth user bootstrap. After the intended account exists, set it to `false` and recreate **only** Open WebUI:
+
+   ```bash
+   cd src
+   docker compose up -d --no-deps open-webui
+   ```
+
+   Do **not** restart or recreate Caddy for this step.
+5. Start only the new services:
+
+   ```bash
+   cd src
+   docker compose up -d open-webui cloudflared
+   ```
+
+Suggested verification sequence:
+
+```bash
+cd src
+docker compose ps open-webui cloudflared
+docker compose logs --tail=100 open-webui cloudflared
+docker compose exec open-webui curl -fsS http://127.0.0.1:8080/health
+```
+
+Then manually verify:
+
+- authorized Cloudflare Access users can reach `https://<OPENWEBUI_DOMAIN>`
+- unauthorized users are blocked by Access
+- existing `https://<CODIMD_DOMAIN>`, `https://<N8N_DOMAIN>`, and `https://<OUTLINE_DOMAIN>` still behave as before
+- RustDesk logs and connectivity remain healthy
+- chat requests succeed against the configured Foundry model
+- file upload succeeds
+- a later file re-read / RAG lookup succeeds against the embedding model
+- the expected Blob objects appear in the `openwebui` container
+- recreating `open-webui` preserves chats, accounts, and configuration stored in `${DATA_ROOT}/open-webui/data`
+
+Azure Blob is **not** the whole storage story here. In Open WebUI v0.11.3, the Azure storage provider writes each upload to `/app/backend/data/uploads` first and then uploads it to Blob storage. The local copy is not removed after a successful upload, so `${DATA_ROOT}` still needs capacity for local Open WebUI growth.
 
 ## RustDesk Configuration
 
@@ -198,7 +409,7 @@ docker exec -t codimd_database_1 pg_dump -U codimd codimd > codimd_backup.sql
 **On Old n8n VM:**
 ```bash
 # Find your postgres container name (e.g., src_postgres_1)
-docker ps 
+docker ps
 
 # Backup n8n DB (replace CONTAINER_NAME)
 docker exec -t CONTAINER_NAME pg_dump -U n8n n8n > n8n_backup.sql
@@ -222,22 +433,60 @@ cat n8n_backup.sql | docker exec -i src-n8n-db-1 psql -U n8n -d n8n_restore_chec
 
 ## Cost Estimation 💰
 
-Monthly cost breakdown (Azure B1ms VM):
-- VM (B1ms): ~$13.14
-- Storage (OS Disk 32GB): ~$2.40
-- **Total: ~$15.54/month**
+This repository does **not** assert a current live VM SKU or monthly price. Confirm the actual VM size, disks, and subscription pricing before you resize for Open WebUI.
 
-_Cheaper than your coffee addiction! ☕_
+Open WebUI mainly adds four cost vectors:
+
+- more VM memory and data-disk consumption on the existing host
+- Azure Blob capacity and transactions for uploads
+- Microsoft Foundry model usage for chat and embeddings
+- Cloudflare Zero Trust / Access features if your usage exceeds the Free tier
+
+Azure Container Apps was not chosen for this repository because Open WebUI still depends on a reliable local filesystem for SQLite and local upload/cache data, while the existing VM usually has near-zero incremental infrastructure cost if it already exists. ACA can still be the better fit in some environments, but once you add durable storage and a database, it usually introduces more moving parts and may cost more than keeping this workload on the current VM.
+
+_Cheaper than your coffee addiction, if you already have the headroom. ☕_
 
 ## Maintenance
 
 ### Updates
 
-Update services to latest versions:
-```bash
-docker compose pull
-docker compose up -d
-```
+Image versions are pinned in `src/docker-compose.yml`. `docker compose pull` by itself can refresh the currently configured tags, but it does **not** move a pinned service to a newer tag.
+
+For an Open WebUI or cloudflared upgrade:
+
+1. Read the upstream release notes first.
+2. Create the pre-upgrade backups from the **Backups** section below.
+3. Edit the exact image tag in `src/docker-compose.yml`.
+4. Validate the Compose file:
+
+   ```bash
+   cd src
+   docker compose config --quiet
+   ```
+
+5. Pull only the changed service image:
+
+   ```bash
+   cd src
+   docker compose pull open-webui
+   ```
+
+6. Recreate only that service:
+
+   ```bash
+   cd src
+   docker compose up -d --no-deps open-webui
+   ```
+
+7. Inspect health and logs:
+
+   ```bash
+   cd src
+   docker compose ps open-webui
+   docker compose logs --tail=100 open-webui
+   ```
+
+Schema migrations can make a blind image rollback unsafe. If an upgrade fails after a schema change, restore from the verified pre-upgrade backup instead of assuming the previous image tag can read the new data safely.
 
 ### Monitoring
 
@@ -258,8 +507,7 @@ htop
 
 ### Backups
 
-Back up all three PostgreSQL databases and Outline's local attachments. These
-commands only create new files; they do not delete or overwrite a database:
+Back up all three PostgreSQL databases, Outline's local attachments, and Open WebUI's local data. These commands create timestamped files and do not overwrite prior backups.
 
 ```bash
 STAMP=$(date +%Y%m%d-%H%M%S)
@@ -277,15 +525,46 @@ sudo tar czf "/mnt/data/backup/${STAMP}/outline-data.tar.gz" \
   -C /mnt/data/outline data
 sudo chown "$(id -u):$(id -g)" "/mnt/data/backup/${STAMP}/outline-data.tar.gz"
 
-# Non-destructive archive validation
+# Open WebUI uses SQLite under /mnt/data/open-webui/data. Stop only this
+# service before copying it, then bring it back immediately.
+docker compose stop open-webui
+sudo tar czf "/mnt/data/backup/${STAMP}/open-webui-data.tar.gz" \
+  -C /mnt/data/open-webui data
+docker compose up -d open-webui
+sudo chown "$(id -u):$(id -g)" "/mnt/data/backup/${STAMP}/open-webui-data.tar.gz"
+
+# Non-destructive backup validation
 cat "/mnt/data/backup/${STAMP}/outline.dump" \
   | docker exec -i src-outline-db-1 pg_restore --list > /dev/null
+tar tzf "/mnt/data/backup/${STAMP}/outline-data.tar.gz" > /dev/null
+tar tzf "/mnt/data/backup/${STAMP}/open-webui-data.tar.gz" > /dev/null
 ```
+
+Azure Blob contents do **not** replace the SQLite/data backup. Chats, accounts, configuration, and other local Open WebUI state still live under `${DATA_ROOT}/open-webui/data`, and that backup remains required.
+
+To verify an Open WebUI restore non-destructively, extract into a **new** directory and inspect the SQLite database there. Never overwrite the live directory for a restore check, and do not delete the verification directory unless you explicitly approve that cleanup.
+
+```bash
+STAMP=<same-backup-stamp>
+VERIFY_ROOT="/mnt/data/restore-check/${STAMP}"
+mkdir -p "${VERIFY_ROOT}/open-webui"
+tar xzf "/mnt/data/backup/${STAMP}/open-webui-data.tar.gz" -C "${VERIFY_ROOT}/open-webui"
+
+if [ -f "${VERIFY_ROOT}/open-webui/data/webui.db" ]; then
+  docker run --rm \
+    -v "${VERIFY_ROOT}/open-webui/data:/restore:ro" \
+    ghcr.io/open-webui/open-webui:v0.11.3 \
+    python -c "import sqlite3; conn=sqlite3.connect('/restore/webui.db'); print(conn.execute('PRAGMA integrity_check;').fetchone()[0]); conn.close()"
+fi
+```
+
+Back up secrets separately in an approved secret manager: `OPENWEBUI_SECRET_KEY`, `OPENWEBUI_MICROSOFT_CLIENT_SECRET`, `OPENWEBUI_FOUNDRY_API_KEY`, `OPENWEBUI_RAG_OPENAI_API_KEY`, and `CLOUDFLARED_TUNNEL_TOKEN` must **not** be stored inside the tar files or in Git.
 
 ## Security Considerations 🔒
 
 1. **Firewall Rules**:
    - Azure NSG allows ports 80/443 (HTTP/HTTPS) and 21114-21119 TCP + 21116 UDP (RustDesk)
+   - No extra inbound NSG port is required for Open WebUI because `cloudflared` makes outbound-only tunnel connections
    - Consider disabling SSH port 22 after initial setup (use Azure Bastion instead)
 
 2. **SSH Access**:
@@ -293,13 +572,19 @@ cat "/mnt/data/backup/${STAMP}/outline.dump" \
    - Password authentication should be disabled
 
 3. **Application Security**:
-   - HTTPS enforced via Caddy
-   - Regular security updates recommended
+   - HTTPS is enforced for CodiMD, n8n, and Outline via Caddy
+   - Open WebUI is intended to sit behind Cloudflare Access on its dedicated hostname
    - CodiMD uses Microsoft Entra ID (OAuth2) for authentication
    - Outline uses the **same** Entra app registration via generic OIDC
+   - Open WebUI should use its **own** dedicated Entra app registration
    - n8n supports built-in authentication and 2FA
 
-4. **Shared Entra app registration** ⚠️:
+4. **Why NSG allowlisting cannot protect one site at a time**:
+   - CodiMD, n8n, and Outline all share the same inbound port `443` behind Caddy
+   - Open WebUI is published through Cloudflare's edge, whose source addresses are shared infrastructure rather than a per-site allowlist you can model at the Azure NSG layer
+   - Because of those two facts, NSG rules can allow or deny transport, but they cannot meaningfully express "allow only this one hostname" for the HTTPS sites
+
+5. **Shared Entra app registration for CodiMD and Outline** ⚠️:
 
    CodiMD and Outline intentionally share one app registration, so:
 
@@ -321,9 +606,50 @@ cat "/mnt/data/backup/${STAMP}/outline.dump" \
 
 ### Cannot connect to services
 - Check VM status in Azure portal
-- Verify DNS settings point to VM IP
+- Verify DNS settings point to the VM IP for Caddy-routed sites
 - Check containers: `docker compose ps`
 - Review logs: `docker compose logs -f`
+
+### Cloudflare Tunnel / Open WebUI route issues
+- Check `docker compose logs cloudflared`
+- Verify the public hostname is routed to `http://open-webui:8080`
+- Verify DNS is the tunnel-managed CNAME, not an `A` record to the VM public IP
+- Confirm `open-webui` and `cloudflared` do not publish host ports
+
+### Microsoft OAuth redirect mismatch
+- Verify `OPENWEBUI_DOMAIN` matches the public hostname exactly
+- Verify the Entra app redirect URI is exactly `https://<OPENWEBUI_DOMAIN>/oauth/microsoft/callback`
+- Confirm the `.env` values map correctly:
+  - `OPENWEBUI_MICROSOFT_CLIENT_ID`
+  - `OPENWEBUI_MICROSOFT_CLIENT_SECRET`
+  - `OPENWEBUI_MICROSOFT_CLIENT_TENANT_ID`
+- Confirm the app is single-tenant and the matching service principal exists
+
+### Foundry URL or model configuration issues
+- `OPENWEBUI_FOUNDRY_BASE_URL` and `OPENWEBUI_RAG_OPENAI_BASE_URL` must end at `/openai/v1`
+- Do **not** put `/models` into either environment variable
+- Verify `OPENWEBUI_FOUNDRY_CHAT_MODEL` is the deployed chat model name
+- Verify `OPENWEBUI_RAG_EMBEDDING_MODEL` is the deployed embedding model name
+
+### Azure Blob 403 or upload failures
+- Verify `OPENWEBUI_AZURE_STORAGE_ENDPOINT` is in the form `https://<storage-account>.blob.core.windows.net`
+- Verify `OPENWEBUI_AZURE_STORAGE_CONTAINER_NAME=openwebui`
+- Verify the container exists and remains private (`-Permission Off`)
+- If the account key was rotated, update `OPENWEBUI_AZURE_STORAGE_KEY` in `.env` and recreate only `open-webui`
+
+### Local disk growth
+- Open WebUI still writes local files under `${DATA_ROOT}/open-webui/data`
+- Uploads are written locally first, then copied to Azure Blob
+- Inspect growth before the disk fills:
+  ```bash
+  du -sh /mnt/data/open-webui/data/*
+  ```
+
+### Memory pressure or OOM
+- `OPENWEBUI_MEM_LIMIT=1024m` is a guardrail, not a sizing guarantee
+- Check `free -h` and `docker stats --no-stream`
+- Review `docker compose logs open-webui` for restart loops or OOM symptoms
+- If the host cannot preserve system headroom, resize the VM instead of reducing existing service limits
 
 ### Database connection issues
 - Check PostgreSQL logs: `docker compose logs codimd-db` or `docker compose logs n8n-db`
@@ -365,12 +691,15 @@ If you migrated from an old n8n instance and cannot login with 2FA:
 For issues:
 1. Check [n8n documentation](https://docs.n8n.io/)
 2. Check [CodiMD documentation](https://hackmd.io/c/codimd-documentation)
-3. Check [RustDesk documentation](https://rustdesk.com/docs/en/self-host/rustdesk-server-oss/docker/)
-4. Open an issue in the original repositories:
+3. Check [Outline documentation](https://docs.getoutline.com/)
+4. Check [Open WebUI documentation](https://docs.openwebui.com/)
+5. Check [RustDesk documentation](https://rustdesk.com/docs/en/self-host/rustdesk-server-oss/docker/)
+6. Open an issue in the original repositories:
    - [n8n-azure-vm-starter](https://github.com/lettucebo/n8n-azure-vm-starter)
    - [CodiMD-Doc](https://github.com/lettucebo/CodiMD-Doc)
-5. Visit [n8n community forums](https://community.n8n.io/)
+   - [Open WebUI](https://github.com/open-webui/open-webui)
+7. Visit [n8n community forums](https://community.n8n.io/)
 
 ## License
 
-This deployment template is MIT licensed. n8n, CodiMD, and RustDesk are licensed under their own respective terms.
+This deployment template is MIT licensed. n8n, CodiMD, Open WebUI, and RustDesk are licensed under their own respective terms.
