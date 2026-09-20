@@ -290,7 +290,7 @@ Open WebUI 經由 Caddy 發布，並透過來源 IP 允許清單進行存取控�
 2. **允許清單設定 (`OPENWEBUI_ALLOWED_IPS`)**：
    - 在 `src/.env` 中，將 `OPENWEBUI_ALLOWED_IPS` 設定為以空格分隔的 IPv4/IPv6 位址或 CIDR 範圍 (例如 `203.0.113.10/32` 或 `203.0.113.10/32 198.51.100.0/24`)。
    - 至 `https://cloudflare.com/cdn-cgi/trace` 查詢目前的來源 IP (`ip=` 欄位)。若您的網路環境使用 IPv6，且流量經由 IPv6 傳送，請一併加入相應的 IPv6 位址或前綴。
-   - **Fail-closed 風險**：`OPENWEBUI_ALLOWED_IPS` 為 **必填**。若留空或未定義，Caddyfile 解析將失敗，導致 **所有** 反向代理站點 (CodiMD、n8n、Outline 與 Open WebUI) 全部中斷服務。
+   - **Fail-closed 風險**：`OPENWEBUI_ALLOWED_IPS` 為 **必填**。展開後的值若為空或未定義，設定仍可通過驗證，但不含任何允許範圍，因此所有 Open WebUI 請求都會收到 `403 Forbidden`。格式錯誤的 IP/CIDR 會使 Caddy 驗證失敗，並可能阻止 Caddy 啟動或重新載入，影響 **所有** 反向代理站點 (CodiMD、n8n、Outline 與 Open WebUI)。
    - 每次修改 `.env` 或 `Caddyfile` 後，皆應執行驗證：
      ```bash
      cd src
@@ -331,13 +331,114 @@ Open WebUI 經由 Caddy 發布，並透過來源 IP 允許清單進行存取控�
    grep -n '^OPENWEBUI_ALLOWED_IPS=' .env
    "@
    $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
-   az vm run-command invoke --subscription <subscription-id> \
-     --resource-group <resource-group> --name <vm-name> --command-id RunShellScript \
+   az vm run-command invoke --subscription <subscription-id> `
+     --resource-group <resource-group> --name <vm-name> --command-id RunShellScript `
      --scripts "printf '%s' '$payload' | base64 -d | bash" --query "value[0].message" -o tsv
    ```
    注意：`sed -i` 會重建檔案，需執行 `chown "$OWNER" .env` 與 `chmod 600 .env` 以保持原有擁有者與權限。
 
-7. **選配硬化**：
+7. **退役舊版 Cloudflare Tunnel (僅適用既有部署)**：
+   在下列所有 Caddy 路徑驗證完成前，請保持舊 tunnel 持續運作。
+
+   **在拉取檔案／映像或套用任何 Compose 變更之前**，先於 VM 的既有部署中，在同一個 shell 執行下列指令。此流程不假設容器名稱、要求只能找到一個結果，並驗證該容器 ID 具有預期的 Compose project 與 service labels：
+
+   ```bash
+   set -eu
+   cd /path/to/CommonVM/src
+   mapfile -t LEGACY_CLOUDFLARED_IDS < <(
+     docker ps -aq \
+       --filter 'label=com.docker.compose.project=src' \
+       --filter 'label=com.docker.compose.service=cloudflared'
+   )
+   test "${#LEGACY_CLOUDFLARED_IDS[@]}" -eq 1
+   LEGACY_CLOUDFLARED_ID="${LEGACY_CLOUDFLARED_IDS[0]}"
+   test "$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' "$LEGACY_CLOUDFLARED_ID")" = 'src'
+   test "$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.service" }}' "$LEGACY_CLOUDFLARED_ID")" = 'cloudflared'
+   printf 'Verified legacy container ID: %s\n' "$LEGACY_CLOUDFLARED_ID"
+   ```
+
+   保持此 shell 開啟，使 `LEGACY_CLOUDFLARED_ID` 持續指向已驗證的容器。接著拉取／套用新的 Compose 設定，**不要停止舊 tunnel**：
+
+   ```bash
+   docker compose pull
+   docker compose up -d open-webui caddy
+   docker compose ps open-webui caddy
+   docker compose logs --tail=100 open-webui caddy
+   ```
+
+   請先完成下列所有檢查：
+
+   - Caddy 狀態正常、Cloudflare proxied A record 已解析至 VM，且 Azure NSG／主機 firewall 允許 Caddy 使用 80 與 443 連接埠。
+   - 允許的來源可進入 Open WebUI Microsoft Entra 登入流程。
+   - Microsoft Entra 登入成功，且 Open WebUI 核心功能正常。
+   - 被拒絕的來源與未列入允許清單的 direct-origin 請求皆收到 `403 Forbidden`。
+
+   **只有在每項檢查都成功後**，才依先前保存的容器 ID 停止並移除已驗證的容器：
+
+   ```bash
+   docker stop "$LEGACY_CLOUDFLARED_ID"
+   docker rm "$LEGACY_CLOUDFLARED_ID"
+   unset LEGACY_CLOUDFLARED_ID LEGACY_CLOUDFLARED_IDS
+   ```
+
+   從 production `src/.env` 移除已退役的 token；流程不會顯示 token，並會保留檔案原本的 numeric owner、group 與 mode：
+
+   ```bash
+   set -euo pipefail
+   ENV_FILE=.env
+   ENV_DIR=$(dirname -- "$ENV_FILE")
+   ENV_BASE=$(basename -- "$ENV_FILE")
+   ENV_OWNER=$(stat -c '%u:%g' "$ENV_FILE")
+   ENV_MODE=$(stat -c '%a' "$ENV_FILE")
+   ENV_BACKUP="$HOME/env-backup-$(date +%Y%m%d%H%M%S).env"
+   ENV_TMP=$(mktemp --tmpdir="$ENV_DIR" ".${ENV_BASE}.XXXXXX")
+   trap 'rm -f -- "$ENV_TMP"' EXIT
+   if ! sudo grep -q '^CLOUDFLARED_TUNNEL_TOKEN=' "$ENV_FILE"; then
+     printf '%s\n' 'CLOUDFLARED_TUNNEL_TOKEN was not found; refusing to replace .env.' >&2
+     exit 1
+   fi
+   sudo cp -a -- "$ENV_FILE" "$ENV_BACKUP"
+   sudo awk '!/^CLOUDFLARED_TUNNEL_TOKEN=/' "$ENV_FILE" > "$ENV_TMP"
+   test -s "$ENV_TMP"
+   if grep -q '^CLOUDFLARED_TUNNEL_TOKEN=' "$ENV_TMP"; then
+     printf '%s\n' 'Token removal check failed; original .env is unchanged.' >&2
+     exit 1
+   fi
+   sudo chown "$ENV_OWNER" "$ENV_TMP"
+   sudo chmod "$ENV_MODE" "$ENV_TMP"
+   sudo mv -- "$ENV_TMP" "$ENV_FILE"
+   trap - EXIT
+   test "$(stat -c '%u:%g' "$ENV_FILE")" = "$ENV_OWNER"
+   test "$(stat -c '%a' "$ENV_FILE")" = "$ENV_MODE"
+   if sudo grep -q '^CLOUDFLARED_TUNNEL_TOKEN=' "$ENV_FILE"; then
+     printf '%s\n' 'Token remains in .env; restore the backup before continuing.' >&2
+     exit 1
+   fi
+   printf 'Backup retained at %s\n' "$ENV_BACKUP"
+   unset ENV_FILE ENV_DIR ENV_BASE ENV_OWNER ENV_MODE ENV_BACKUP ENV_TMP
+   ```
+
+   最後，使用正確的 Cloudflare 帳戶完成 Wrangler 驗證、列出 remote named tunnels，並明確選擇要退役的 tunnel。Tunnel 名稱在帳戶內唯一，但刪除時仍應使用 `tunnel info` 顯示的 UUID，並在執行前確認名稱：
+
+   ```bash
+   export npm_config_registry='https://packagefeedproxy.microsoft.io/npm/'
+   npx --yes wrangler@latest tunnel list
+   read -r -p 'Exact legacy tunnel name from the list: ' LEGACY_TUNNEL_NAME
+   test -n "$LEGACY_TUNNEL_NAME"
+   TUNNEL_INFO=$(npx --yes wrangler@latest tunnel info "$LEGACY_TUNNEL_NAME")
+   printf '%s\n' "$TUNNEL_INFO"
+   RESOLVED_TUNNEL_NAME=$(printf '%s\n' "$TUNNEL_INFO" | sed -n 's/^Name:[[:space:]]*//p')
+   LEGACY_TUNNEL_ID=$(printf '%s\n' "$TUNNEL_INFO" | sed -n 's/^ID:[[:space:]]*//p')
+   test "$RESOLVED_TUNNEL_NAME" = "$LEGACY_TUNNEL_NAME"
+   test -n "$LEGACY_TUNNEL_ID"
+   npx --yes wrangler@latest tunnel info "$LEGACY_TUNNEL_ID"
+   read -r -p "Type DELETE $RESOLVED_TUNNEL_NAME to confirm: " CONFIRM
+   test "$CONFIRM" = "DELETE $RESOLVED_TUNNEL_NAME"
+   npx --yes wrangler@latest tunnel delete "$LEGACY_TUNNEL_ID"
+   unset LEGACY_TUNNEL_NAME TUNNEL_INFO RESOLVED_TUNNEL_NAME LEGACY_TUNNEL_ID CONFIRM npm_config_registry
+   ```
+
+8. **選配硬化**：
    - **Cloudflare WAF 邊緣 IP 規則**：可新增 WAF 自訂規則 `(http.host eq "openweb.example.com" and not ip.src in {<your-ips>})` → Block，在 Cloudflare 邊緣阻斷非允許流量，不消耗 VM 運算資源。
    - **Cloudflare Cache Bypass**：建立 Cache Rule，針對 `http.host eq "openweb.example.com"` 設定 Bypass Cache，避免靜態資源在邊緣節點被未授權 IP 取得。
    - **Tailscale / WireGuard**：若 IP 經常變動，可搭配 Mesh VPN (Tailscale/WireGuard) 以固定私有 IP 存取 Open WebUI，徹底免去頻繁維護公網 IP 清單的困擾。
@@ -664,7 +765,7 @@ fi
 - **Cloudflare 標頭設定**：
   - 在 Cloudflare 控制台確認「Remove visitor IP headers」為 **Off**。
   - 確認「Pseudo IPv4」**未** 設定為「Overwrite Headers」。
-- **Caddyfile 解析與語法驗證**：若 `OPENWEBUI_ALLOWED_IPS` 留空或格式有誤，會造成 Caddy 解析失敗並影響所有反向代理站點。請使用以下指令驗證：
+- **允許清單與 Caddy 驗證**：展開後的 `OPENWEBUI_ALLOWED_IPS` 若為空或未定義，所有 Open WebUI 請求都會收到 403。格式錯誤的 IP/CIDR 會使 Caddy 驗證失敗，並可能阻止啟動或重新載入，影響所有反向代理站點。請使用以下指令驗證：
   ```bash
   docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
   ```

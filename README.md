@@ -293,7 +293,7 @@ Open WebUI is published through Caddy with a source-IP allowlist:
 2. **Allowlist configuration (`OPENWEBUI_ALLOWED_IPS`)**:
    - In `src/.env`, set `OPENWEBUI_ALLOWED_IPS` to space-separated IPv4 or IPv6 addresses or CIDR ranges (e.g. `203.0.113.10/32` or `203.0.113.10/32 198.51.100.0/24`).
    - Find your current public IP by visiting `https://cloudflare.com/cdn-cgi/trace` and copying the `ip=` field. If your network provides IPv6, ensure you include the relevant IPv6 address/prefix if your traffic routes over IPv6.
-   - **Fail-closed risk**: `OPENWEBUI_ALLOWED_IPS` is **required**. An empty or missing value causes the Caddyfile parsing to fail validation, taking **all** reverse-proxied sites (CodiMD, n8n, Outline, and Open WebUI) offline.
+   - **Fail-closed risk**: `OPENWEBUI_ALLOWED_IPS` is **required**. An empty or missing expanded value validates but contains no allowed ranges, so Caddy returns `403 Forbidden` for every Open WebUI request. A malformed IP/CIDR fails Caddy validation and can prevent Caddy from starting or reloading, affecting **all** reverse-proxied sites (CodiMD, n8n, Outline, and Open WebUI).
    - Validate Caddy configuration whenever editing `.env` or `Caddyfile`:
      ```bash
      cd src
@@ -334,13 +334,114 @@ Open WebUI is published through Caddy with a source-IP allowlist:
    grep -n '^OPENWEBUI_ALLOWED_IPS=' .env
    "@
    $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
-   az vm run-command invoke --subscription <subscription-id> \
-     --resource-group <resource-group> --name <vm-name> --command-id RunShellScript \
+   az vm run-command invoke --subscription <subscription-id> `
+     --resource-group <resource-group> --name <vm-name> --command-id RunShellScript `
      --scripts "printf '%s' '$payload' | base64 -d | bash" --query "value[0].message" -o tsv
    ```
    Notice that `sed -i` recreates the file; `chown "$OWNER" .env` and `chmod 600 .env` preserve ownership and permissions.
 
-7. **Optional hardening**:
+7. **Retire a legacy Cloudflare Tunnel (existing deployments only)**:
+   Keep the old tunnel running until the Caddy path has passed every verification below.
+
+   **Before pulling files/images or applying any Compose change**, run the following from the existing VM deployment in one shell. It finds the legacy container without assuming its name, requires exactly one match, and verifies that exact container ID carries the intended Compose project and service labels:
+
+   ```bash
+   set -eu
+   cd /path/to/CommonVM/src
+   mapfile -t LEGACY_CLOUDFLARED_IDS < <(
+     docker ps -aq \
+       --filter 'label=com.docker.compose.project=src' \
+       --filter 'label=com.docker.compose.service=cloudflared'
+   )
+   test "${#LEGACY_CLOUDFLARED_IDS[@]}" -eq 1
+   LEGACY_CLOUDFLARED_ID="${LEGACY_CLOUDFLARED_IDS[0]}"
+   test "$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' "$LEGACY_CLOUDFLARED_ID")" = 'src'
+   test "$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.service" }}' "$LEGACY_CLOUDFLARED_ID")" = 'cloudflared'
+   printf 'Verified legacy container ID: %s\n' "$LEGACY_CLOUDFLARED_ID"
+   ```
+
+   Keep this shell open so `LEGACY_CLOUDFLARED_ID` continues to identify the container you verified. Then pull/apply the new Compose configuration **without stopping the old tunnel**:
+
+   ```bash
+   docker compose pull
+   docker compose up -d open-webui caddy
+   docker compose ps open-webui caddy
+   docker compose logs --tail=100 open-webui caddy
+   ```
+
+   Complete all of these checks first:
+
+   - Caddy is healthy, Cloudflare's proxied A record resolves to the VM, and the Azure NSG/host firewall permits Caddy on ports 80 and 443.
+   - An allowed source reaches the Open WebUI Microsoft Entra sign-in flow.
+   - Microsoft Entra sign-in succeeds and core Open WebUI functionality works.
+   - A denied source and a non-allowlisted direct-origin request receive `403 Forbidden`.
+
+   **Only after every check succeeds**, stop and remove the previously verified container by its captured ID:
+
+   ```bash
+   docker stop "$LEGACY_CLOUDFLARED_ID"
+   docker rm "$LEGACY_CLOUDFLARED_ID"
+   unset LEGACY_CLOUDFLARED_ID LEGACY_CLOUDFLARED_IDS
+   ```
+
+   Remove the retired token from production `src/.env` without displaying it and while preserving the file's original numeric owner, group, and mode:
+
+   ```bash
+   set -euo pipefail
+   ENV_FILE=.env
+   ENV_DIR=$(dirname -- "$ENV_FILE")
+   ENV_BASE=$(basename -- "$ENV_FILE")
+   ENV_OWNER=$(stat -c '%u:%g' "$ENV_FILE")
+   ENV_MODE=$(stat -c '%a' "$ENV_FILE")
+   ENV_BACKUP="$HOME/env-backup-$(date +%Y%m%d%H%M%S).env"
+   ENV_TMP=$(mktemp --tmpdir="$ENV_DIR" ".${ENV_BASE}.XXXXXX")
+   trap 'rm -f -- "$ENV_TMP"' EXIT
+   if ! sudo grep -q '^CLOUDFLARED_TUNNEL_TOKEN=' "$ENV_FILE"; then
+     printf '%s\n' 'CLOUDFLARED_TUNNEL_TOKEN was not found; refusing to replace .env.' >&2
+     exit 1
+   fi
+   sudo cp -a -- "$ENV_FILE" "$ENV_BACKUP"
+   sudo awk '!/^CLOUDFLARED_TUNNEL_TOKEN=/' "$ENV_FILE" > "$ENV_TMP"
+   test -s "$ENV_TMP"
+   if grep -q '^CLOUDFLARED_TUNNEL_TOKEN=' "$ENV_TMP"; then
+     printf '%s\n' 'Token removal check failed; original .env is unchanged.' >&2
+     exit 1
+   fi
+   sudo chown "$ENV_OWNER" "$ENV_TMP"
+   sudo chmod "$ENV_MODE" "$ENV_TMP"
+   sudo mv -- "$ENV_TMP" "$ENV_FILE"
+   trap - EXIT
+   test "$(stat -c '%u:%g' "$ENV_FILE")" = "$ENV_OWNER"
+   test "$(stat -c '%a' "$ENV_FILE")" = "$ENV_MODE"
+   if sudo grep -q '^CLOUDFLARED_TUNNEL_TOKEN=' "$ENV_FILE"; then
+     printf '%s\n' 'Token remains in .env; restore the backup before continuing.' >&2
+     exit 1
+   fi
+   printf 'Backup retained at %s\n' "$ENV_BACKUP"
+   unset ENV_FILE ENV_DIR ENV_BASE ENV_OWNER ENV_MODE ENV_BACKUP ENV_TMP
+   ```
+
+   Finally, authenticate Wrangler for the correct Cloudflare account, list the remote named tunnels, and select the intended tunnel explicitly. Tunnel names are account-unique, but use the UUID shown by `tunnel info` for deletion and confirm the name before proceeding:
+
+   ```bash
+   export npm_config_registry='https://packagefeedproxy.microsoft.io/npm/'
+   npx --yes wrangler@latest tunnel list
+   read -r -p 'Exact legacy tunnel name from the list: ' LEGACY_TUNNEL_NAME
+   test -n "$LEGACY_TUNNEL_NAME"
+   TUNNEL_INFO=$(npx --yes wrangler@latest tunnel info "$LEGACY_TUNNEL_NAME")
+   printf '%s\n' "$TUNNEL_INFO"
+   RESOLVED_TUNNEL_NAME=$(printf '%s\n' "$TUNNEL_INFO" | sed -n 's/^Name:[[:space:]]*//p')
+   LEGACY_TUNNEL_ID=$(printf '%s\n' "$TUNNEL_INFO" | sed -n 's/^ID:[[:space:]]*//p')
+   test "$RESOLVED_TUNNEL_NAME" = "$LEGACY_TUNNEL_NAME"
+   test -n "$LEGACY_TUNNEL_ID"
+   npx --yes wrangler@latest tunnel info "$LEGACY_TUNNEL_ID"
+   read -r -p "Type DELETE $RESOLVED_TUNNEL_NAME to confirm: " CONFIRM
+   test "$CONFIRM" = "DELETE $RESOLVED_TUNNEL_NAME"
+   npx --yes wrangler@latest tunnel delete "$LEGACY_TUNNEL_ID"
+   unset LEGACY_TUNNEL_NAME TUNNEL_INFO RESOLVED_TUNNEL_NAME LEGACY_TUNNEL_ID CONFIRM npm_config_registry
+   ```
+
+8. **Optional hardening**:
    - **Cloudflare WAF edge IP rule**: You can add a WAF custom rule `(http.host eq "openweb.example.com" and not ip.src in {<your-ips>})` → Block. This blocks unauthorized traffic at the Cloudflare edge without consuming VM resources.
    - **Cloudflare Cache Bypass**: Create a Cache Rule matching `http.host eq "openweb.example.com"` with Cache eligibility set to "Bypass cache" to ensure static assets are not cached at edge nodes for blocked clients.
    - **Tailscale / WireGuard**: If you experience frequent IP address changes, accessing Open WebUI over a mesh VPN (Tailscale/WireGuard) with a static private IP eliminates the need to update public IP allowlists.
@@ -671,7 +772,7 @@ Back up secrets separately in an approved secret manager: `OPENWEBUI_SECRET_KEY`
 - **Cloudflare header settings**:
   - In Cloudflare dashboard, confirm "Remove visitor IP headers" is **Off**.
   - Confirm "Pseudo IPv4" is **not** set to "Overwrite Headers".
-- **Caddyfile parsing and validation**: An empty or malformed `OPENWEBUI_ALLOWED_IPS` will cause Caddy configuration parsing to fail, affecting all reverse-proxied sites. Test configuration with:
+- **Allowlist and Caddy validation**: An empty or missing expanded `OPENWEBUI_ALLOWED_IPS` denies every Open WebUI request with 403. A malformed IP/CIDR fails Caddy validation and can prevent startup or reload, affecting all reverse-proxied sites. Test configuration with:
   ```bash
   docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
   ```

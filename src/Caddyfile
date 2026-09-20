@@ -89,7 +89,9 @@
     # matched by their peer address and remain blocked unless explicitly allowed.
     #
     # respond runs before reverse_proxy in Caddy's default directive order.
-    # OPENWEBUI_ALLOWED_IPS is required; an empty value makes validation fail.
+    # An empty or missing expanded allowlist denies every Open WebUI request.
+    # A malformed IP/CIDR fails validation and can prevent Caddy startup or
+    # reload, affecting every reverse-proxied site.
     @not_allowed not client_ip {$OPENWEBUI_ALLOWED_IPS}
     respond @not_allowed "Forbidden" 403
 
