@@ -332,8 +332,12 @@ Open WebUI is published through Caddy with a source-IP allowlist:
        'ENV_FILE=.env'
        'test -f "$ENV_FILE"'
        'ENV_OWNER=$(stat -c ''%u:%g'' "$ENV_FILE")'
+       'ENV_OWNER_USER=$(stat -c ''%U'' "$ENV_FILE")'
        'ENV_MODE=$(stat -c ''%a'' "$ENV_FILE")'
-       'ENV_BACKUP="$HOME/env-backup-$(date +%Y%m%d%H%M%S).env"'
+       'ENV_OWNER_HOME=$(getent passwd "$ENV_OWNER_USER" | cut -d: -f6)'
+       'test -n "$ENV_OWNER_HOME"'
+       'test -d "$ENV_OWNER_HOME"'
+       'ENV_BACKUP="$ENV_OWNER_HOME/env-backup-$(date +%Y%m%d%H%M%S).env"'
        'ENV_DIR=$(dirname -- "$ENV_FILE")'
        'ENV_BASE=$(basename -- "$ENV_FILE")'
        'ENV_TMP=$(mktemp --tmpdir="$ENV_DIR" ".${ENV_BASE}.XXXXXX")'
@@ -423,8 +427,12 @@ Open WebUI is published through Caddy with a source-IP allowlist:
    ENV_DIR=$(dirname -- "$ENV_FILE")
    ENV_BASE=$(basename -- "$ENV_FILE")
    ENV_OWNER=$(stat -c '%u:%g' "$ENV_FILE")
+   ENV_OWNER_USER=$(stat -c '%U' "$ENV_FILE")
    ENV_MODE=$(stat -c '%a' "$ENV_FILE")
-   ENV_BACKUP="$HOME/env-backup-$(date +%Y%m%d%H%M%S).env"
+   ENV_OWNER_HOME=$(getent passwd "$ENV_OWNER_USER" | cut -d: -f6)
+   test -n "$ENV_OWNER_HOME"
+   test -d "$ENV_OWNER_HOME"
+   ENV_BACKUP="$ENV_OWNER_HOME/env-backup-$(date +%Y%m%d%H%M%S).env"
    ENV_TMP=$(mktemp --tmpdir="$ENV_DIR" ".${ENV_BASE}.XXXXXX")
    trap 'rm -f -- "$ENV_TMP"' EXIT
    if ! sudo grep -q '^CLOUDFLARED_TUNNEL_TOKEN=' "$ENV_FILE"; then
@@ -449,7 +457,7 @@ Open WebUI is published through Caddy with a source-IP allowlist:
      exit 1
    fi
    printf 'Backup retained at %s\n' "$ENV_BACKUP"
-   unset ENV_FILE ENV_DIR ENV_BASE ENV_OWNER ENV_MODE ENV_BACKUP ENV_TMP
+   unset ENV_FILE ENV_DIR ENV_BASE ENV_OWNER ENV_OWNER_USER ENV_MODE ENV_OWNER_HOME ENV_BACKUP ENV_TMP
    ```
 
    Finally, authenticate Wrangler for the correct Cloudflare account, list the remote named tunnels, and select the intended tunnel explicitly. Tunnel names are account-unique, but use the UUID shown by `tunnel info` for deletion and confirm the name before proceeding.

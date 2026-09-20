@@ -329,8 +329,12 @@ Open WebUI 經由 Caddy 發布，並透過來源 IP 允許清單進行存取控�
        'ENV_FILE=.env'
        'test -f "$ENV_FILE"'
        'ENV_OWNER=$(stat -c ''%u:%g'' "$ENV_FILE")'
+       'ENV_OWNER_USER=$(stat -c ''%U'' "$ENV_FILE")'
        'ENV_MODE=$(stat -c ''%a'' "$ENV_FILE")'
-       'ENV_BACKUP="$HOME/env-backup-$(date +%Y%m%d%H%M%S).env"'
+       'ENV_OWNER_HOME=$(getent passwd "$ENV_OWNER_USER" | cut -d: -f6)'
+       'test -n "$ENV_OWNER_HOME"'
+       'test -d "$ENV_OWNER_HOME"'
+       'ENV_BACKUP="$ENV_OWNER_HOME/env-backup-$(date +%Y%m%d%H%M%S).env"'
        'ENV_DIR=$(dirname -- "$ENV_FILE")'
        'ENV_BASE=$(basename -- "$ENV_FILE")'
        'ENV_TMP=$(mktemp --tmpdir="$ENV_DIR" ".${ENV_BASE}.XXXXXX")'
@@ -420,8 +424,12 @@ Open WebUI 經由 Caddy 發布，並透過來源 IP 允許清單進行存取控�
    ENV_DIR=$(dirname -- "$ENV_FILE")
    ENV_BASE=$(basename -- "$ENV_FILE")
    ENV_OWNER=$(stat -c '%u:%g' "$ENV_FILE")
+   ENV_OWNER_USER=$(stat -c '%U' "$ENV_FILE")
    ENV_MODE=$(stat -c '%a' "$ENV_FILE")
-   ENV_BACKUP="$HOME/env-backup-$(date +%Y%m%d%H%M%S).env"
+   ENV_OWNER_HOME=$(getent passwd "$ENV_OWNER_USER" | cut -d: -f6)
+   test -n "$ENV_OWNER_HOME"
+   test -d "$ENV_OWNER_HOME"
+   ENV_BACKUP="$ENV_OWNER_HOME/env-backup-$(date +%Y%m%d%H%M%S).env"
    ENV_TMP=$(mktemp --tmpdir="$ENV_DIR" ".${ENV_BASE}.XXXXXX")
    trap 'rm -f -- "$ENV_TMP"' EXIT
    if ! sudo grep -q '^CLOUDFLARED_TUNNEL_TOKEN=' "$ENV_FILE"; then
@@ -446,7 +454,7 @@ Open WebUI 經由 Caddy 發布，並透過來源 IP 允許清單進行存取控�
      exit 1
    fi
    printf 'Backup retained at %s\n' "$ENV_BACKUP"
-   unset ENV_FILE ENV_DIR ENV_BASE ENV_OWNER ENV_MODE ENV_BACKUP ENV_TMP
+   unset ENV_FILE ENV_DIR ENV_BASE ENV_OWNER ENV_OWNER_USER ENV_MODE ENV_OWNER_HOME ENV_BACKUP ENV_TMP
    ```
 
    最後，使用正確的 Cloudflare 帳戶完成 Wrangler 驗證、列出 remote named tunnels，並明確選擇要退役的 tunnel。Tunnel 名稱在帳戶內唯一，但刪除時仍應使用 `tunnel info` 顯示的 UUID，並在執行前確認名稱。
