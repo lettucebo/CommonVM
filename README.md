@@ -332,10 +332,10 @@ Open WebUI is published through Caddy with a source-IP allowlist:
    docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
    docker compose up -d caddy
    grep -n '^OPENWEBUI_ALLOWED_IPS=' .env
-   "@
+"@
    $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
-   az vm run-command invoke --subscription <subscription-id> `
-     --resource-group <resource-group> --name <vm-name> --command-id RunShellScript `
+   az vm run-command invoke --subscription '<subscription-id>' `
+     --resource-group '<resource-group>' --name '<vm-name>' --command-id RunShellScript `
      --scripts "printf '%s' '$payload' | base64 -d | bash" --query "value[0].message" -o tsv
    ```
    Notice that `sed -i` recreates the file; `chown "$OWNER" .env` and `chmod 600 .env` preserve ownership and permissions.
@@ -430,8 +430,8 @@ Open WebUI is published through Caddy with a source-IP allowlist:
    test -n "$LEGACY_TUNNEL_NAME"
    TUNNEL_INFO=$(npx --yes wrangler@latest tunnel info "$LEGACY_TUNNEL_NAME")
    printf '%s\n' "$TUNNEL_INFO"
-   RESOLVED_TUNNEL_NAME=$(printf '%s\n' "$TUNNEL_INFO" | sed -n 's/^Name:[[:space:]]*//p')
-   LEGACY_TUNNEL_ID=$(printf '%s\n' "$TUNNEL_INFO" | sed -n 's/^ID:[[:space:]]*//p')
+   RESOLVED_TUNNEL_NAME=$(printf '%s\n' "$TUNNEL_INFO" | sed -n 's/^[[:space:]]*Name:[[:space:]]*//p')
+   LEGACY_TUNNEL_ID=$(printf '%s\n' "$TUNNEL_INFO" | sed -n 's/^[[:space:]]*ID:[[:space:]]*//p')
    test "$RESOLVED_TUNNEL_NAME" = "$LEGACY_TUNNEL_NAME"
    test -n "$LEGACY_TUNNEL_ID"
    npx --yes wrangler@latest tunnel info "$LEGACY_TUNNEL_ID"

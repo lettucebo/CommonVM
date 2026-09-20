@@ -329,10 +329,10 @@ Open WebUI 經由 Caddy 發布，並透過來源 IP 允許清單進行存取控�
    docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
    docker compose up -d caddy
    grep -n '^OPENWEBUI_ALLOWED_IPS=' .env
-   "@
+"@
    $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
-   az vm run-command invoke --subscription <subscription-id> `
-     --resource-group <resource-group> --name <vm-name> --command-id RunShellScript `
+   az vm run-command invoke --subscription '<subscription-id>' `
+     --resource-group '<resource-group>' --name '<vm-name>' --command-id RunShellScript `
      --scripts "printf '%s' '$payload' | base64 -d | bash" --query "value[0].message" -o tsv
    ```
    注意：`sed -i` 會重建檔案，需執行 `chown "$OWNER" .env` 與 `chmod 600 .env` 以保持原有擁有者與權限。
@@ -427,8 +427,8 @@ Open WebUI 經由 Caddy 發布，並透過來源 IP 允許清單進行存取控�
    test -n "$LEGACY_TUNNEL_NAME"
    TUNNEL_INFO=$(npx --yes wrangler@latest tunnel info "$LEGACY_TUNNEL_NAME")
    printf '%s\n' "$TUNNEL_INFO"
-   RESOLVED_TUNNEL_NAME=$(printf '%s\n' "$TUNNEL_INFO" | sed -n 's/^Name:[[:space:]]*//p')
-   LEGACY_TUNNEL_ID=$(printf '%s\n' "$TUNNEL_INFO" | sed -n 's/^ID:[[:space:]]*//p')
+   RESOLVED_TUNNEL_NAME=$(printf '%s\n' "$TUNNEL_INFO" | sed -n 's/^[[:space:]]*Name:[[:space:]]*//p')
+   LEGACY_TUNNEL_ID=$(printf '%s\n' "$TUNNEL_INFO" | sed -n 's/^[[:space:]]*ID:[[:space:]]*//p')
    test "$RESOLVED_TUNNEL_NAME" = "$LEGACY_TUNNEL_NAME"
    test -n "$LEGACY_TUNNEL_ID"
    npx --yes wrangler@latest tunnel info "$LEGACY_TUNNEL_ID"
