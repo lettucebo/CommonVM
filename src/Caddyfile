@@ -79,3 +79,39 @@
         X-Content-Type-Options "nosniff"
     }
 }
+
+# Open WebUI
+# OPENWEBUI_DOMAIN is required. If it expands to an empty or missing value,
+# Caddy validation fails because this server block has no site address, which
+# can prevent the shared reverse proxy from starting or reloading.
+{$OPENWEBUI_DOMAIN} {
+    # Network allowlist. Open WebUI's Entra ID login remains the identity boundary.
+    #
+    # client_ip uses the trusted proxy and CF-Connecting-IP settings from the
+    # global block to resolve the real visitor IP. Direct origin requests are
+    # matched by their peer address and remain blocked unless explicitly allowed.
+    #
+    # respond runs before reverse_proxy in Caddy's default directive order.
+    # An empty or missing expanded allowlist denies every Open WebUI request.
+    # A malformed IP/CIDR fails validation and can prevent Caddy startup or
+    # reload, affecting every reverse-proxied site.
+    @not_allowed not client_ip {$OPENWEBUI_ALLOWED_IPS}
+    respond @not_allowed "Forbidden" 403
+
+    reverse_proxy open-webui:8080 {
+        header_up X-Forwarded-For {client_ip}
+        header_up Host {host}
+        header_up X-Forwarded-Proto "https"
+    }
+
+    {$CADDY_TLS}
+
+    # Security Headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        Permissions-Policy "interest-cohort=()"
+        X-XSS-Protection "1; mode=block"
+        X-Frame-Options "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"
+    }
+}
