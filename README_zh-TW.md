@@ -1,15 +1,15 @@
 # CodiMD、Outline、n8n、Open WebUI 與 RustDesk 合併服務
 
-此設定使用 Docker Compose，將 CodiMD、Outline、n8n、Open WebUI、Cloudflare Tunnel 與 RustDesk 合併到單一 VM 上。Caddy 仍只負責 CodiMD、n8n 與 Outline 的反向代理。
+此設定使用 Docker Compose，將 CodiMD、Outline、n8n、Open WebUI 與 RustDesk 合併到單一 VM 上。Caddy 負責 CodiMD、n8n、Outline 與 Open WebUI 的反向代理。
 
 > **說明**：此專案合併了多個部署：
 > - [n8n-azure-vm-starter](https://github.com/lettucebo/n8n-azure-vm-starter) - n8n 工作流程自動化
 > - [CodiMD-Doc](https://github.com/lettucebo/CodiMD-Doc) - 協作式 Markdown 編輯器
 > - [Outline](https://github.com/outline/outline) - 團隊知識庫，導入中，未來取代 CodiMD
-> - [Open WebUI](https://github.com/open-webui/open-webui) - 自架聊天與 RAG 介面，透過專屬 Cloudflare Tunnel 對外發布
+> - [Open WebUI](https://github.com/open-webui/open-webui) - 自架聊天與 RAG 介面，經 Caddy 發布並以來源 IP 允許清單限制存取
 > - [RustDesk Server](https://github.com/rustdesk/rustdesk-server) - 自架遠端桌面中繼伺服器
 
-> **Open WebUI 對外發布模式**：Open WebUI **不是**走 Caddy。它透過專屬 Cloudflare Tunnel 發布，並由 Cloudflare Access 保護，因此不需要額外開放 inbound NSG port，也不會改動既有的 Caddy 路由。
+> **Open WebUI 對外發布模式**：Open WebUI 經由 Caddy 發布，採用三層模型：Cloudflare proxied DNS → 依 hostname 限制的 Caddy 來源 IP 允許清單 → Open WebUI Microsoft Entra OAuth。Open WebUI 的 Microsoft Entra ID 登入才是身分邊界，IP 允許清單並非身分邊界。僅有 `{$OPENWEBUI_DOMAIN}` 受允許清單限制，既有站點路由維持不變。
 
 ## 前置需求
 
@@ -20,7 +20,8 @@
   - CodiMD (`CODIMD_DOMAIN`)
   - n8n (`N8N_DOMAIN`)
   - Outline (`OUTLINE_DOMAIN`)
-- 給專屬 Open WebUI 網域 (`OPENWEBUI_DOMAIN`) 使用的 Cloudflare Zero Trust 帳戶與作用中的 zone
+  - Open WebUI (`OPENWEBUI_DOMAIN`)
+- 為 Open WebUI hostname (`OPENWEBUI_DOMAIN`) 啟用 Proxy (橘色雲朵) 的 Cloudflare 代管 zone
 - 用於 **專屬** Open WebUI app registration 的 Microsoft Entra tenant
 - 可透過 OpenAI 相容 `/openai/v1` base URL 存取的 Microsoft Foundry chat 與 embedding deployment
 - 給 Open WebUI uploads 使用的專屬 Azure Storage Account 與 private Blob container
@@ -98,8 +99,8 @@ newgrp docker
      **Settings → Details** 重新命名。
    - 本設定的 `OUTLINE_FILE_STORAGE_UPLOAD_MAX_SIZE` 預設為 10 MiB；
      只有在評估 VM 記憶體與磁碟容量後才提高。
-   - Open WebUI 第一次啟動前，先完成所有 `OPENWEBUI_*` 與
-     `CLOUDFLARED_*` 佔位值設定。
+   - Open WebUI 第一次啟動前，先完成所有 `OPENWEBUI_*` 佔位值設定
+     (包含 `OPENWEBUI_ALLOWED_IPS`)。
    - **重要**：修改 `.env` 中的 `DATA_ROOT` 變數，將其指向您的掛載路徑 (預設：`/mnt/data`)。
 4. **設定資料夾權限**：
    由於容器內的使用者 ID (UID) 可能與主機不同，請執行以下指令修正資料夾權限，以避免 `Permission denied` 錯誤：
@@ -136,25 +137,26 @@ newgrp docker
    <VM_PUBLIC_IP> <CODIMD_DOMAIN>
    <VM_PUBLIC_IP> <N8N_DOMAIN>
    <VM_PUBLIC_IP> <OUTLINE_DOMAIN>
+   <VM_PUBLIC_IP> <OPENWEBUI_DOMAIN>
    ```
 
    **B. 暫時使用自簽憑證**
    在 `.env` 設定 `CADDY_TLS=tls internal`，再執行
-   `docker compose restart caddy`。這會讓 Caddy 在 DNS 尚未設定時使用自簽憑證。
+   `docker compose up -d caddy`。這會讓 Caddy 在 DNS 尚未設定時使用自簽憑證。
 
    **C. 測試連線**
-   1. 重新啟動 Caddy：`docker compose restart caddy`
-   2. 在瀏覽器開啟 `https://<CODIMD_DOMAIN>`、`https://<N8N_DOMAIN>` 與
-      `https://<OUTLINE_DOMAIN>`。
+   1. 重新啟動 Caddy：`docker compose up -d caddy`
+   2. 在瀏覽器開啟 `https://<CODIMD_DOMAIN>`、`https://<N8N_DOMAIN>`、
+      `https://<OUTLINE_DOMAIN>` 與 `https://<OPENWEBUI_DOMAIN>`。
    3. 瀏覽器會警告「連線不安全」(因為是自簽憑證)，請點擊「進階」並選擇「繼續前往」。
-   4. 確認 CodiMD、n8n 與 Outline 功能正常。
+   4. 確認 CodiMD、n8n、Outline 與 Open WebUI 功能正常。
 
    **D. 準備正式上線**
    確認一切正常後：
    1. 移除本機 hosts 檔案中的設定。
    2. 在 DNS 供應商處將網域指向 VM IP。
    3. 清空 `.env` 中的 `CADDY_TLS`。
-   4. 執行 `docker compose restart caddy`，讓 Caddy 申請正式的
+   4. 執行 `docker compose up -d caddy`，讓 Caddy 申請正式的
       Let's Encrypt 憑證。
 
 8. **正式驗證**：
@@ -163,8 +165,9 @@ newgrp docker
    - 存取 `https://<CODIMD_DOMAIN>`
    - 存取 `https://<N8N_DOMAIN>`
    - 存取 `https://<OUTLINE_DOMAIN>`
+   - 存取 `https://<OPENWEBUI_DOMAIN>`
 
-## Open WebUI 部署 (Cloudflare Tunnel + Microsoft Entra ID)
+## Open WebUI 部署 (Caddy allowlist + Microsoft Entra ID)
 
 本節所有指令都從 `src/` 執行。
 
@@ -277,24 +280,69 @@ unset FOUNDRY_KEY BASE_URL
 
 這只是驗證範本；**不代表**此儲存庫已替您的 live endpoint 做過測試。
 
-### Cloudflare Tunnel 與 Access
+### 存取控制與 DNS
 
-請在 Cloudflare Zero Trust dashboard 建立 **remotely managed** tunnel。
+Open WebUI 經由 Caddy 發布，並透過來源 IP 允許清單進行存取控制：
 
-1. 在 Zero Trust 建立 tunnel。
-2. 新增 public hostname，hostname 欄位只填 `<OPENWEBUI_DOMAIN>`（例如 `openwebui.example.com`），再另外把 service target 設成 `http://open-webui:8080`。如果介面另外要求選 protocol，請在那裡選 `HTTP`，不要在 hostname 欄位輸入 `https://`。
-3. 只複製一次 tunnel token，填入 `src/.env` 的 `CLOUDFLARED_TUNNEL_TOKEN`。這個 token 是 secret。
-4. DNS 必須維持 tunnel-managed **CNAME**，**不要**把此 hostname 建成指向 VM public IP 的 `A` record。
-5. 針對同一個 hostname 建立 **self-hosted** 的 Cloudflare Access application，並新增只允許目標 Entra 使用者或群組的 **Allow** policy。
+1. **DNS 設定**：
+   在 Cloudflare 管理介面中，為 Open WebUI 子網域 (例如 `openweb` 或與 `OPENWEBUI_DOMAIN` 相符的名稱) 新增一筆指向 VM 公用 IP 的 **A** 紀錄。Proxy 狀態必須設為 **Proxied** (橘色雲朵)，與既有的 CodiMD、n8n 及 Outline DNS 紀錄相同。
 
-Tunnel 從 VM 發出的是 outbound-only 連線。`open-webui` 與 `cloudflared` 都不會對 host 發布 port，這可避免此 hostname 被 direct-origin bypass，也不會干擾既有由 Caddy 發布的站點。目前這個 hostname 依賴單一 tunnel connector；`restart: always` 可協助 `cloudflared` 行程自動復原，而 `docker compose logs cloudflared` 是路由失效時的第一個檢查點。
+2. **允許清單設定 (`OPENWEBUI_ALLOWED_IPS`)**：
+   - 在 `src/.env` 中，將 `OPENWEBUI_ALLOWED_IPS` 設定為以空格分隔的 IPv4/IPv6 位址或 CIDR 範圍 (例如 `203.0.113.10/32` 或 `203.0.113.10/32 198.51.100.0/24`)。
+   - 至 `https://cloudflare.com/cdn-cgi/trace` 查詢目前的來源 IP (`ip=` 欄位)。若您的網路環境使用 IPv6，且流量經由 IPv6 傳送，請一併加入相應的 IPv6 位址或前綴。
+   - **Fail-closed 風險**：`OPENWEBUI_ALLOWED_IPS` 為 **必填**。若留空或未定義，Caddyfile 解析將失敗，導致 **所有** 反向代理站點 (CodiMD、n8n、Outline 與 Open WebUI) 全部中斷服務。
+   - 每次修改 `.env` 或 `Caddyfile` 後，皆應執行驗證：
+     ```bash
+     cd src
+     docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+     ```
 
-Compose 會將 Open WebUI HTTP 與 Socket.IO 的 CORS 限制為 `https://${OPENWEBUI_DOMAIN}`。Open WebUI v0.11.3 仍可能顯示誤導性警告，聲稱 Microsoft logout 必須設定 `OPENID_PROVIDER_URL` 或 `OPENID_END_SESSION_ENDPOINT`；內建 Microsoft provider 實際上已使用 tenant-specific OpenID discovery，logout route 也會解析該 provider metadata。不要只為了消除警告而新增自訂 logout endpoint，因為那條路徑會略過正常的 `id_token_hint` 處理。調整 OAuth 設定前，應先透過真實的 Access 與 Microsoft 登入流程驗證 logout。
+3. **套用設定變更**：
+   修改 `.env` 中的 `OPENWEBUI_ALLOWED_IPS` 或任何其他變數後，必須執行：
+   ```bash
+   cd src
+   docker compose up -d caddy
+   ```
+   > **重要**：**不要** 使用 `docker compose restart caddy`。`restart` 指令會沿用現有容器的環境變數，**不會** 載入 `.env` 的最新設定。
 
-權威文件：
+4. **連線驗證**：
+   - **允許的來源 IP**：連線至 `https://<OPENWEBUI_DOMAIN>` 會順利進入 Open WebUI 並顯示 Microsoft Entra ID 登入按鈕。
+   - **被拒絕的來源 IP**：非允許清單內的 IP 存取時，Caddy 會立即回應 `403 Forbidden`。
+   - **直連 Origin**：略過 Cloudflare 直接連向 VM IP 的請求，因缺乏受信任 proxy 的 `CF-Connecting-IP` 標頭，Caddy 會依 socket peer address 比對，非允許 IP 同樣會收到 `403 Forbidden`。
 
-- <https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/>
-- <https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/>
+5. **Cloudflare Zone 設定注意事項**：
+   - **Remove visitor IP headers**：必須維持 **Off** (關閉，預設值)。若開啟，Cloudflare 會移除 `CF-Connecting-IP` 標頭，使 Caddy 無法取得真實訪客 IP。
+   - **Pseudo IPv4**：**不可** 設為 "Overwrite Headers"。若覆寫標頭，Cloudflare 會將 `CF-Connecting-IP` 置換為 64:ff9b:: 映射位址，破壞 IPv4 CIDR 比對。
+
+6. **IP 變動被鎖在外面時的復原方式 (Azure Run Command)**：
+   若外網 IP 變更而收到 403 被阻擋，可透過已登入 Azure CLI 的機器執行 Run Command 更新 `.env`，無需依賴 SSH 或 Web 存取：
+   ```powershell
+   $newIp = '<新公網 IP>/32'   # 至 https://cloudflare.com/cdn-cgi/trace 查看 ip=
+   $script = @"
+   set -eu
+   cd /path/to/CommonVM/src
+   OWNER=`$(stat -c '%U:%G' .env)
+   cp -a .env "`$HOME/env-backup-`$(date +%Y%m%d%H%M%S).env"
+   sed -i 's|^OPENWEBUI_ALLOWED_IPS=.*|OPENWEBUI_ALLOWED_IPS=$newIp|' .env
+   chown "`$OWNER" .env
+   chmod 600 .env
+   docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+   docker compose up -d caddy
+   grep -n '^OPENWEBUI_ALLOWED_IPS=' .env
+   "@
+   $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
+   az vm run-command invoke --subscription <subscription-id> \
+     --resource-group <resource-group> --name <vm-name> --command-id RunShellScript \
+     --scripts "printf '%s' '$payload' | base64 -d | bash" --query "value[0].message" -o tsv
+   ```
+   注意：`sed -i` 會重建檔案，需執行 `chown "$OWNER" .env` 與 `chmod 600 .env` 以保持原有擁有者與權限。
+
+7. **選配硬化**：
+   - **Cloudflare WAF 邊緣 IP 規則**：可新增 WAF 自訂規則 `(http.host eq "openweb.example.com" and not ip.src in {<your-ips>})` → Block，在 Cloudflare 邊緣阻斷非允許流量，不消耗 VM 運算資源。
+   - **Cloudflare Cache Bypass**：建立 Cache Rule，針對 `http.host eq "openweb.example.com"` 設定 Bypass Cache，避免靜態資源在邊緣節點被未授權 IP 取得。
+   - **Tailscale / WireGuard**：若 IP 經常變動，可搭配 Mesh VPN (Tailscale/WireGuard) 以固定私有 IP 存取 Open WebUI，徹底免去頻繁維護公網 IP 清單的困擾。
+
+Compose 會將 Open WebUI HTTP 與 Socket.IO 的 CORS 限制為 `https://${OPENWEBUI_DOMAIN}`。Open WebUI v0.11.3 仍可能顯示誤導性警告，聲稱 Microsoft logout 必須設定 `OPENID_PROVIDER_URL` 或 `OPENID_END_SESSION_ENDPOINT`；內建 Microsoft provider 實際上已使用 tenant-specific OpenID discovery，logout route 也會解析該 provider metadata。不要只為了消除警告而新增自訂 logout endpoint，因為那條路徑會略過正常的 `id_token_hint` 處理。調整 OAuth 設定前，應先透過真實的 Microsoft 登入流程驗證 logout。
 
 ### 第一次啟動與驗證
 
@@ -309,8 +357,9 @@ sudo install -d -m 0750 /mnt/data/open-webui/data
 接著準備第一次啟動：
 
 1. 若尚未建立，請先在 `src/` 內把 `.env.example` 複製成 `.env`。
-2. 啟動前先填完所有 Open WebUI 與 Cloudflare 相關欄位：
+2. 啟動前先填完所有 Open WebUI 與 Caddy 相關欄位：
    - `OPENWEBUI_DOMAIN`
+   - `OPENWEBUI_ALLOWED_IPS`
    - `OPENWEBUI_MEM_LIMIT`
    - `OPENWEBUI_SECRET_KEY`
    - `OPENWEBUI_ENABLE_OAUTH_SIGNUP`
@@ -326,7 +375,6 @@ sudo install -d -m 0750 /mnt/data/open-webui/data
    - `OPENWEBUI_RAG_OPENAI_BASE_URL`
    - `OPENWEBUI_RAG_OPENAI_API_KEY`
    - `OPENWEBUI_RAG_EMBEDDING_MODEL`
-   - `CLOUDFLARED_TUNNEL_TOKEN`
 3. 保持 `ENABLE_PERSISTENT_CONFIG=false`。在這個模式下，環境變數會維持 authoritative；Admin UI 裡的設定看起來可能能編輯，但重啟後不會保留。
 4. 初次建立授權 OAuth 使用者時，先保持 `OPENWEBUI_ENABLE_OAUTH_SIGNUP=true`。在目標帳號建立完成後，把它改成 `false`，然後只重建 **Open WebUI**：
 
@@ -340,22 +388,24 @@ sudo install -d -m 0750 /mnt/data/open-webui/data
 
    ```bash
    cd src
-   docker compose up -d open-webui cloudflared
+   docker compose up -d open-webui caddy
    ```
 
 建議驗證順序如下：
 
 ```bash
 cd src
-docker compose ps open-webui cloudflared
-docker compose logs --tail=100 open-webui cloudflared
+docker compose ps open-webui caddy
+docker compose logs --tail=100 open-webui caddy
+docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 docker compose exec open-webui curl -fsS http://127.0.0.1:8080/health
 ```
 
 之後再手動驗證：
 
-- 有權限的 Cloudflare Access 使用者可以進入 `https://<OPENWEBUI_DOMAIN>`
-- 未授權使用者會被 Access 擋下
+- 允許清單內的用戶端 IP 可以存取 `https://<OPENWEBUI_DOMAIN>` 並看到 Entra ID 登入選項
+- 非允許清單內的用戶端 IP 會收到 `403 Forbidden`
+- 未經允許的直連 origin 請求會收到 `403 Forbidden`
 - 既有 `https://<CODIMD_DOMAIN>`、`https://<N8N_DOMAIN>` 與 `https://<OUTLINE_DOMAIN>` 行為維持不變
 - RustDesk 的 logs 與連線仍正常
 - chat requests 能成功打到設定好的 Foundry model
@@ -433,12 +483,11 @@ cat n8n_backup.sql | docker exec -i src-n8n-db-1 psql -U n8n -d n8n_restore_chec
 
 此儲存庫 **不會** 宣稱目前實際的 VM SKU 或每月價格。若要為 Open WebUI 擴容，請先確認您訂用帳戶中的真實 VM 規格、磁碟與定價。
 
-Open WebUI 主要新增四類成本：
+Open WebUI 主要新增三類成本：
 
 - 現有主機上的額外 VM 記憶體與 data disk 使用量
 - uploads 對應的 Azure Blob 容量與交易費用
 - chat 與 embeddings 的 Microsoft Foundry 模型用量
-- 當使用量超過 Free tier 時，Cloudflare Zero Trust / Access 的功能成本
 
 此儲存庫沒有改用 Azure Container Apps，主因是 Open WebUI 仍依賴可靠的本機檔案系統來保存 SQLite 與本機 upload/cache 資料，而既有 VM 若已存在，通常幾乎沒有額外基礎設施成本。當然，在某些環境中 ACA 仍可能更合適；只是當您需要 durable storage 與資料庫之後，它通常會增加更多元件，也可能比把此工作負載留在目前 VM 上更貴。
 
@@ -450,7 +499,7 @@ _如果本來就有足夠 headroom，可能還是比您的咖啡癮便宜。☕_
 
 `src/docker-compose.yml` 內的 image version 都是 pinned。單獨執行 `docker compose pull` 只能刷新目前已設定的 tag，**不會**把 pinned service 升到新的 tag。
 
-升級 Open WebUI 或 cloudflared 時：
+升級 Open WebUI 時：
 
 1. 先閱讀上游 release notes。
 2. 先建立下方 **備份** 章節中的升級前備份。
@@ -558,13 +607,13 @@ if [ -f "${VERIFY_ROOT}/open-webui/data/webui.db" ]; then
 fi
 ```
 
-請另外把 secrets 備份到核准的 secret manager：`OPENWEBUI_SECRET_KEY`、`OPENWEBUI_MICROSOFT_CLIENT_SECRET`、`OPENWEBUI_FOUNDRY_API_KEY`、`OPENWEBUI_RAG_OPENAI_API_KEY` 與 `CLOUDFLARED_TUNNEL_TOKEN` **不得** 存在 tar 檔裡，也 **不得** 放進 Git。
+請另外把 secrets 備份到核准的 secret manager：`OPENWEBUI_SECRET_KEY`、`OPENWEBUI_MICROSOFT_CLIENT_SECRET`、`OPENWEBUI_FOUNDRY_API_KEY` 與 `OPENWEBUI_RAG_OPENAI_API_KEY` **不得** 存在 tar 檔裡，也 **不得** 放進 Git。
 
 ## 安全性考量 🔒
 
 1. **防火牆規則**：
    - Azure NSG 允許 80/443 (HTTP/HTTPS) 與 21114-21119 TCP + 21116 UDP (RustDesk)
-   - Open WebUI 不需要額外 inbound NSG port，因為 `cloudflared` 使用 outbound-only tunnel 連線
+   - Open WebUI 經由既有的 Caddy 80/443 port 提供服務；不需要額外開放 inbound NSG port
    - 建議在初始設定後停用 SSH port 22 (改用 Azure Bastion)
 
 2. **SSH 存取**：
@@ -572,17 +621,18 @@ fi
    - 應停用密碼驗證
 
 3. **應用程式安全性**：
-   - CodiMD、n8n 與 Outline 由 Caddy 強制使用 HTTPS
-   - Open WebUI 預期放在專屬 hostname 的 Cloudflare Access 後方
+   - CodiMD、n8n、Outline 與 Open WebUI 由 Caddy 強制使用 HTTPS
+   - Open WebUI 採用三層存取模型：Cloudflare proxied DNS → 依 hostname 限制的 Caddy 來源 IP 允許清單 → Open WebUI Microsoft Entra ID OAuth
+   - Microsoft Entra ID OAuth 才是身分邊界，IP 允許清單並非身分邊界，僅作為縮小暴露面的深層防禦手段
    - CodiMD 使用 Microsoft Entra ID (OAuth2) 進行驗證
    - Outline 透過通用 OIDC 沿用 **同一個** Entra app registration
    - Open WebUI 應使用 **自己的** 專屬 Entra app registration
    - n8n 支援內建驗證和雙因素驗證 (2FA)
 
 4. **為什麼無法靠 NSG allowlist 保護單一網站**：
-   - CodiMD、n8n 與 Outline 都共用 Caddy 後面的同一個 inbound port `443`
-   - Open WebUI 是透過 Cloudflare edge 發布，而 Cloudflare source address 屬於共用基礎設施，無法在 Azure NSG 層精確表示成「單一站台專用 allowlist」
-   - 因此 NSG 規則只能處理傳輸層的 allow/deny，無法對這些 HTTPS 站台有效表達「只允許某一個 hostname」
+   - CodiMD、n8n、Outline 與 Open WebUI 都共用 Caddy 後面的同一個 inbound port `443`
+   - 由於 Cloudflare edge IP 位址屬於跨網域的共用基礎設施，Azure NSG 無法在傳輸層區分不同的 hostname，亦無法在 Cloudflare proxy 背後依訪客 IP 進行過濾
+   - Caddy 在應用層依據受信任 Cloudflare proxy 傳遞的 `CF-Connecting-IP` 標頭執行個別 hostname 的 IP 允許清單比對，其他站台不受影響
 
 5. **CodiMD 與 Outline 共用 Entra app registration** ⚠️：
 
@@ -607,11 +657,19 @@ fi
 - 檢查容器：`docker compose ps`
 - 查看日誌：`docker compose logs -f`
 
-### Cloudflare Tunnel / Open WebUI 路由問題
-- 檢查 `docker compose logs cloudflared`
-- 確認 public hostname 指向的是 `http://open-webui:8080`
-- 確認 DNS 是 tunnel-managed CNAME，而不是指向 VM public IP 的 `A` record
-- 確認 `open-webui` 與 `cloudflared` 沒有發布 host port
+### Open WebUI 回應 403
+- **確認您的訪客 IP**：前往 `https://cloudflare.com/cdn-cgi/trace` 查看 `ip=` 欄位，確認連線是使用 IPv4 還是 IPv6。
+- **檢查 `OPENWEBUI_ALLOWED_IPS`**：確認 `src/.env` 中的 `OPENWEBUI_ALLOWED_IPS` 包含您目前的 IP 位址或 CIDR 網段。多個網段以空白分隔。
+- **是否正確套用環境變數？**：修改 `.env` 後必須執行 `docker compose up -d caddy`。使用 `docker compose restart caddy` 不會重新讀取 `.env` 的環境變數。
+- **Cloudflare 標頭設定**：
+  - 在 Cloudflare 控制台確認「Remove visitor IP headers」為 **Off**。
+  - 確認「Pseudo IPv4」**未** 設定為「Overwrite Headers」。
+- **Caddyfile 解析與語法驗證**：若 `OPENWEBUI_ALLOWED_IPS` 留空或格式有誤，會造成 Caddy 解析失敗並影響所有反向代理站點。請使用以下指令驗證：
+  ```bash
+  docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+  ```
+- **直連 Origin 存取**：略過 Cloudflare 直連 VM 公用 IP 的連線，若訪客 socket IP 不在允許清單內，一律會收到 403。
+- **被鎖在外面時的復原**：若 IP 變更導致被 403 阻擋，請透過 Azure Run Command 更新 `.env` (參考「存取控制與 DNS」章節的指令範本)。
 
 ### Microsoft OAuth redirect mismatch
 - 確認 `OPENWEBUI_DOMAIN` 與公開 hostname 完全一致

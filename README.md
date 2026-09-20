@@ -1,15 +1,15 @@
 # Common Services
 
-This setup combines CodiMD, Outline, n8n, Open WebUI, Cloudflare Tunnel, and RustDesk onto a single VM using Docker Compose. Caddy remains the reverse proxy for CodiMD, n8n, and Outline only.
+This setup combines CodiMD, Outline, n8n, Open WebUI, and RustDesk onto a single VM using Docker Compose. Caddy acts as the reverse proxy for CodiMD, n8n, Outline, and Open WebUI.
 
 > **Note**: This project merges multiple deployments:
 > - [n8n-azure-vm-starter](https://github.com/lettucebo/n8n-azure-vm-starter) - n8n workflow automation
 > - [CodiMD-Doc](https://github.com/lettucebo/CodiMD-Doc) - Collaborative markdown editor
 > - [Outline](https://github.com/outline/outline) - Team knowledge base, being introduced to replace CodiMD
-> - [Open WebUI](https://github.com/open-webui/open-webui) - Self-hosted chat and RAG UI, published through a dedicated Cloudflare Tunnel
+> - [Open WebUI](https://github.com/open-webui/open-webui) - Self-hosted chat and RAG UI, published through Caddy with a source-IP allowlist
 > - [RustDesk Server](https://github.com/rustdesk/rustdesk-server) - Self-hosted remote desktop relay
 
-> **Open WebUI publishing model**: Open WebUI is **not** routed by Caddy. It is published through a dedicated Cloudflare Tunnel and protected by Cloudflare Access, so no additional inbound NSG port is required and the existing Caddy routes stay unchanged.
+> **Open WebUI publishing model**: Open WebUI is published through Caddy using a three-tier model: Cloudflare proxied DNS → hostname-scoped Caddy source-IP allowlist → Open WebUI Microsoft Entra OAuth. Open WebUI's Microsoft Entra ID login, not the IP allowlist, remains the identity boundary. Only `{$OPENWEBUI_DOMAIN}` is subject to the allowlist; existing routes remain unchanged.
 
 ## Prerequisites
 
@@ -20,7 +20,8 @@ This setup combines CodiMD, Outline, n8n, Open WebUI, Cloudflare Tunnel, and Rus
   - CodiMD (`CODIMD_DOMAIN`)
   - n8n (`N8N_DOMAIN`)
   - Outline (`OUTLINE_DOMAIN`)
-- Cloudflare Zero Trust account and active zone for the dedicated Open WebUI hostname (`OPENWEBUI_DOMAIN`)
+  - Open WebUI (`OPENWEBUI_DOMAIN`)
+- Cloudflare-managed zone with proxy enabled (orange cloud) for the Open WebUI hostname (`OPENWEBUI_DOMAIN`)
 - Microsoft Entra tenant for a **dedicated** Open WebUI app registration
 - Microsoft Foundry chat and embedding deployments reachable through an OpenAI-compatible `/openai/v1` base URL
 - Dedicated Azure Storage Account and private Blob container for Open WebUI uploads
@@ -100,8 +101,8 @@ newgrp docker
    - `OUTLINE_FILE_STORAGE_UPLOAD_MAX_SIZE` defaults to 10 MiB in this
      configuration. Increase it only after considering VM memory and disk
      capacity.
-   - Configure every `OPENWEBUI_*` and `CLOUDFLARED_*` placeholder before the
-     first Open WebUI boot.
+   - Configure every `OPENWEBUI_*` placeholder (including
+     `OPENWEBUI_ALLOWED_IPS`) before the first Open WebUI boot.
    - **Important**: Update `DATA_ROOT` in `.env` to point to your mounted disk path (default: `/mnt/data`).
 4. **Fix Folder Permissions**:
    Since container user IDs (UID) may differ from the host, run the following commands to fix folder permissions and avoid `Permission denied` errors:
@@ -138,26 +139,27 @@ newgrp docker
    <VM_PUBLIC_IP> <CODIMD_DOMAIN>
    <VM_PUBLIC_IP> <N8N_DOMAIN>
    <VM_PUBLIC_IP> <OUTLINE_DOMAIN>
+   <VM_PUBLIC_IP> <OPENWEBUI_DOMAIN>
    ```
 
    **B. Temporary Self-Signed Certificate**
    Set `CADDY_TLS=tls internal` in `.env`, then run
-   `docker compose restart caddy`. This allows Caddy to issue self-signed
+   `docker compose up -d caddy`. This allows Caddy to issue self-signed
    certificates before DNS is available.
 
    **C. Test Connection**
-   1. Restart Caddy: `docker compose restart caddy`
-   2. Open `https://<CODIMD_DOMAIN>`, `https://<N8N_DOMAIN>`, and
-      `https://<OUTLINE_DOMAIN>` in your browser.
+   1. Restart Caddy: `docker compose up -d caddy`
+   2. Open `https://<CODIMD_DOMAIN>`, `https://<N8N_DOMAIN>`,
+      `https://<OUTLINE_DOMAIN>`, and `https://<OPENWEBUI_DOMAIN>` in your browser.
    3. Your browser will warn about an insecure connection (due to self-signed cert). Click "Advanced" and "Proceed".
-   4. Verify CodiMD, n8n, and Outline functionality.
+   4. Verify CodiMD, n8n, Outline, and Open WebUI functionality.
 
    **D. Prepare for Production**
    Once everything works:
    1. Remove the hosts file entries.
    2. Point your DNS to the VM IP at your DNS provider.
    3. Clear `CADDY_TLS` in `.env`.
-   4. Run `docker compose restart caddy` to let Caddy obtain official
+   4. Run `docker compose up -d caddy` to let Caddy obtain official
       Let's Encrypt certificates.
 
 8. **Final Verification**:
@@ -166,8 +168,9 @@ newgrp docker
    - Access `https://<CODIMD_DOMAIN>`
    - Access `https://<N8N_DOMAIN>`
    - Access `https://<OUTLINE_DOMAIN>`
+   - Access `https://<OPENWEBUI_DOMAIN>`
 
-## Open WebUI Deployment (Cloudflare Tunnel + Microsoft Entra ID)
+## Open WebUI Deployment (Caddy allowlist + Microsoft Entra ID)
 
 All commands in this section run from `src/`.
 
@@ -280,24 +283,69 @@ unset FOUNDRY_KEY BASE_URL
 
 That example is only a template; it does **not** imply this repository has tested your live endpoint.
 
-### Cloudflare Tunnel and Access
+### Access control and DNS
 
-Create a **remotely managed** tunnel in the Cloudflare Zero Trust dashboard.
+Open WebUI is published through Caddy with a source-IP allowlist:
 
-1. Create the tunnel in Zero Trust.
-2. Add a public hostname for `<OPENWEBUI_DOMAIN>` (for example, `openwebui.example.com`), then set the service target separately to `http://open-webui:8080` in the dashboard. If the UI asks for a protocol, choose `HTTP` there rather than typing `https://` into the hostname field.
-3. Copy the tunnel token once into `CLOUDFLARED_TUNNEL_TOKEN` in `src/.env`. The token is secret.
-4. Keep DNS as the tunnel-managed **CNAME**. Do **not** create an `A` record from the hostname to the VM public IP.
-5. Create a **self-hosted** Cloudflare Access application for the same hostname and add an **Allow** policy for the intended Entra users or groups.
+1. **DNS configuration**:
+   In your Cloudflare dashboard, add an **A** record for the Open WebUI subdomain (e.g., `openweb` matching `OPENWEBUI_DOMAIN`) pointing to the VM public IP. Ensure the proxy status is **Proxied** (orange cloud), matching the existing CodiMD, n8n, and Outline DNS records.
 
-Tunnel traffic is outbound-only from the VM. Neither `open-webui` nor `cloudflared` publishes a host port, which prevents direct-origin bypass for this hostname and does not interfere with the existing Caddy-published sites. This hostname currently depends on a single tunnel connector; `restart: always` helps recover the `cloudflared` process, and `docker compose logs cloudflared` is the first place to check if the route disappears.
+2. **Allowlist configuration (`OPENWEBUI_ALLOWED_IPS`)**:
+   - In `src/.env`, set `OPENWEBUI_ALLOWED_IPS` to space-separated IPv4 or IPv6 addresses or CIDR ranges (e.g. `203.0.113.10/32` or `203.0.113.10/32 198.51.100.0/24`).
+   - Find your current public IP by visiting `https://cloudflare.com/cdn-cgi/trace` and copying the `ip=` field. If your network provides IPv6, ensure you include the relevant IPv6 address/prefix if your traffic routes over IPv6.
+   - **Fail-closed risk**: `OPENWEBUI_ALLOWED_IPS` is **required**. An empty or missing value causes the Caddyfile parsing to fail validation, taking **all** reverse-proxied sites (CodiMD, n8n, Outline, and Open WebUI) offline.
+   - Validate Caddy configuration whenever editing `.env` or `Caddyfile`:
+     ```bash
+     cd src
+     docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+     ```
 
-Compose restricts Open WebUI HTTP and Socket.IO CORS to `https://${OPENWEBUI_DOMAIN}`. Open WebUI v0.11.3 may still log a misleading warning that Microsoft logout requires `OPENID_PROVIDER_URL` or `OPENID_END_SESSION_ENDPOINT`; the built-in Microsoft provider already uses tenant-specific OpenID discovery, and the logout route resolves that provider metadata. Do not add a custom logout endpoint only to silence the warning, because that path omits the normal `id_token_hint` handling. Verify logout through the real Access and Microsoft sign-in flow before changing the OAuth configuration.
+3. **Applying configuration changes**:
+   After modifying `OPENWEBUI_ALLOWED_IPS` or any other environment variable in `.env`, always run:
+   ```bash
+   cd src
+   docker compose up -d caddy
+   ```
+   > **Important**: Do **not** use `docker compose restart caddy`. The `restart` command reuses existing container environment variables and will **not** pick up changes from `.env`.
 
-Authoritative references:
+4. **Access verification**:
+   - **Allowed source IP**: Requests to `https://<OPENWEBUI_DOMAIN>` reach Open WebUI and display the Microsoft Entra ID sign-in page.
+   - **Denied source IP**: Requests from unlisted IPs receive an immediate `403 Forbidden` response from Caddy.
+   - **Direct origin requests**: Requests bypassing Cloudflare directly to the VM IP do not present a trusted proxy `CF-Connecting-IP` header; Caddy falls back to the socket peer address and blocks them with `403 Forbidden` unless the peer IP is explicitly allowlisted.
 
-- <https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/>
-- <https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/>
+5. **Cloudflare zone settings requirements**:
+   - **Remove visitor IP headers**: Must remain **Off** (default). If enabled, Cloudflare drops `CF-Connecting-IP`, preventing Caddy from identifying the real client IP.
+   - **Pseudo IPv4**: Must **not** be set to "Overwrite Headers". If set to overwrite headers, Cloudflare overwrites `CF-Connecting-IP` with a 64:ff9b:: mapped address, breaking IPv4 CIDR matching.
+
+6. **Lockout recovery via Azure Run Command**:
+   If your client IP changes and you are locked out with a 403, update `OPENWEBUI_ALLOWED_IPS` using Azure Run Command without needing SSH or web access:
+   ```powershell
+   $newIp = '<your-new-ip>/32'   # Check https://cloudflare.com/cdn-cgi/trace for ip=
+   $script = @"
+   set -eu
+   cd /path/to/CommonVM/src
+   OWNER=`$(stat -c '%U:%G' .env)
+   cp -a .env "`$HOME/env-backup-`$(date +%Y%m%d%H%M%S).env"
+   sed -i 's|^OPENWEBUI_ALLOWED_IPS=.*|OPENWEBUI_ALLOWED_IPS=$newIp|' .env
+   chown "`$OWNER" .env
+   chmod 600 .env
+   docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+   docker compose up -d caddy
+   grep -n '^OPENWEBUI_ALLOWED_IPS=' .env
+   "@
+   $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
+   az vm run-command invoke --subscription <subscription-id> \
+     --resource-group <resource-group> --name <vm-name> --command-id RunShellScript \
+     --scripts "printf '%s' '$payload' | base64 -d | bash" --query "value[0].message" -o tsv
+   ```
+   Notice that `sed -i` recreates the file; `chown "$OWNER" .env` and `chmod 600 .env` preserve ownership and permissions.
+
+7. **Optional hardening**:
+   - **Cloudflare WAF edge IP rule**: You can add a WAF custom rule `(http.host eq "openweb.example.com" and not ip.src in {<your-ips>})` → Block. This blocks unauthorized traffic at the Cloudflare edge without consuming VM resources.
+   - **Cloudflare Cache Bypass**: Create a Cache Rule matching `http.host eq "openweb.example.com"` with Cache eligibility set to "Bypass cache" to ensure static assets are not cached at edge nodes for blocked clients.
+   - **Tailscale / WireGuard**: If you experience frequent IP address changes, accessing Open WebUI over a mesh VPN (Tailscale/WireGuard) with a static private IP eliminates the need to update public IP allowlists.
+
+Compose restricts Open WebUI HTTP and Socket.IO CORS to `https://${OPENWEBUI_DOMAIN}`. Open WebUI v0.11.3 may still log a misleading warning that Microsoft logout requires `OPENID_PROVIDER_URL` or `OPENID_END_SESSION_ENDPOINT`; the built-in Microsoft provider already uses tenant-specific OpenID discovery, and the logout route resolves that provider metadata. Do not add a custom logout endpoint only to silence the warning, because that path omits the normal `id_token_hint` handling. Verify logout through the real Microsoft sign-in flow before changing the OAuth configuration.
 
 ### First boot and verification
 
@@ -312,8 +360,9 @@ Open WebUI image `ghcr.io/open-webui/open-webui:v0.11.3` runs as UID/GID `0` by 
 Then prepare the first boot:
 
 1. From `src/`, copy `.env.example` to `.env` if you have not already done so.
-2. Fill every Open WebUI and Cloudflare placeholder before starting:
+2. Fill every Open WebUI and Caddy placeholder before starting:
    - `OPENWEBUI_DOMAIN`
+   - `OPENWEBUI_ALLOWED_IPS`
    - `OPENWEBUI_MEM_LIMIT`
    - `OPENWEBUI_SECRET_KEY`
    - `OPENWEBUI_ENABLE_OAUTH_SIGNUP`
@@ -329,7 +378,6 @@ Then prepare the first boot:
    - `OPENWEBUI_RAG_OPENAI_BASE_URL`
    - `OPENWEBUI_RAG_OPENAI_API_KEY`
    - `OPENWEBUI_RAG_EMBEDDING_MODEL`
-   - `CLOUDFLARED_TUNNEL_TOKEN`
 3. Leave `ENABLE_PERSISTENT_CONFIG=false` in place. In this mode, environment variables remain authoritative; Admin UI configuration edits may appear editable but do not persist across restart.
 4. Leave `OPENWEBUI_ENABLE_OAUTH_SIGNUP=true` for the first authorized OAuth user bootstrap. After the intended account exists, set it to `false` and recreate **only** Open WebUI:
 
@@ -343,22 +391,24 @@ Then prepare the first boot:
 
    ```bash
    cd src
-   docker compose up -d open-webui cloudflared
+   docker compose up -d open-webui caddy
    ```
 
 Suggested verification sequence:
 
 ```bash
 cd src
-docker compose ps open-webui cloudflared
-docker compose logs --tail=100 open-webui cloudflared
+docker compose ps open-webui caddy
+docker compose logs --tail=100 open-webui caddy
+docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 docker compose exec open-webui curl -fsS http://127.0.0.1:8080/health
 ```
 
 Then manually verify:
 
-- authorized Cloudflare Access users can reach `https://<OPENWEBUI_DOMAIN>`
-- unauthorized users are blocked by Access
+- allowed client IP can reach `https://<OPENWEBUI_DOMAIN>` and see the Entra ID sign-in option
+- denied client IP returns `403 Forbidden`
+- direct origin request without allowed client IP returns `403 Forbidden`
 - existing `https://<CODIMD_DOMAIN>`, `https://<N8N_DOMAIN>`, and `https://<OUTLINE_DOMAIN>` still behave as before
 - RustDesk logs and connectivity remain healthy
 - chat requests succeed against the configured Foundry model
@@ -437,12 +487,11 @@ cat n8n_backup.sql | docker exec -i src-n8n-db-1 psql -U n8n -d n8n_restore_chec
 
 This repository does **not** assert a current live VM SKU or monthly price. Confirm the actual VM size, disks, and subscription pricing before you resize for Open WebUI.
 
-Open WebUI mainly adds four cost vectors:
+Open WebUI mainly adds three cost vectors:
 
 - more VM memory and data-disk consumption on the existing host
 - Azure Blob capacity and transactions for uploads
 - Microsoft Foundry model usage for chat and embeddings
-- Cloudflare Zero Trust / Access features if your usage exceeds the Free tier
 
 Azure Container Apps was not chosen for this repository because Open WebUI still depends on a reliable local filesystem for SQLite and local upload/cache data, while the existing VM usually has near-zero incremental infrastructure cost if it already exists. ACA can still be the better fit in some environments, but once you add durable storage and a database, it usually introduces more moving parts and may cost more than keeping this workload on the current VM.
 
@@ -454,7 +503,7 @@ _Cheaper than your coffee addiction, if you already have the headroom. ☕_
 
 Image versions are pinned in `src/docker-compose.yml`. `docker compose pull` by itself can refresh the currently configured tags, but it does **not** move a pinned service to a newer tag.
 
-For an Open WebUI or cloudflared upgrade:
+For an Open WebUI upgrade:
 
 1. Read the upstream release notes first.
 2. Create the pre-upgrade backups from the **Backups** section below.
@@ -562,13 +611,13 @@ if [ -f "${VERIFY_ROOT}/open-webui/data/webui.db" ]; then
 fi
 ```
 
-Back up secrets separately in an approved secret manager: `OPENWEBUI_SECRET_KEY`, `OPENWEBUI_MICROSOFT_CLIENT_SECRET`, `OPENWEBUI_FOUNDRY_API_KEY`, `OPENWEBUI_RAG_OPENAI_API_KEY`, and `CLOUDFLARED_TUNNEL_TOKEN` must **not** be stored inside the tar files or in Git.
+Back up secrets separately in an approved secret manager: `OPENWEBUI_SECRET_KEY`, `OPENWEBUI_MICROSOFT_CLIENT_SECRET`, `OPENWEBUI_FOUNDRY_API_KEY`, and `OPENWEBUI_RAG_OPENAI_API_KEY` must **not** be stored inside the tar files or in Git.
 
 ## Security Considerations 🔒
 
 1. **Firewall Rules**:
    - Azure NSG allows ports 80/443 (HTTP/HTTPS) and 21114-21119 TCP + 21116 UDP (RustDesk)
-   - No extra inbound NSG port is required for Open WebUI because `cloudflared` makes outbound-only tunnel connections
+   - Open WebUI is served over the existing Caddy ports 80/443; no extra inbound NSG ports are required
    - Consider disabling SSH port 22 after initial setup (use Azure Bastion instead)
 
 2. **SSH Access**:
@@ -576,17 +625,18 @@ Back up secrets separately in an approved secret manager: `OPENWEBUI_SECRET_KEY`
    - Password authentication should be disabled
 
 3. **Application Security**:
-   - HTTPS is enforced for CodiMD, n8n, and Outline via Caddy
-   - Open WebUI is intended to sit behind Cloudflare Access on its dedicated hostname
+   - HTTPS is enforced for CodiMD, n8n, Outline, and Open WebUI via Caddy
+   - Open WebUI uses a three-tier access model: Cloudflare proxied DNS → hostname-scoped Caddy source-IP allowlist → Open WebUI Microsoft Entra ID OAuth
+   - Microsoft Entra ID OAuth, not the IP allowlist, remains the identity boundary. The IP allowlist is a defense-in-depth measure restricting network exposure
    - CodiMD uses Microsoft Entra ID (OAuth2) for authentication
    - Outline uses the **same** Entra app registration via generic OIDC
    - Open WebUI should use its **own** dedicated Entra app registration
    - n8n supports built-in authentication and 2FA
 
 4. **Why NSG allowlisting cannot protect one site at a time**:
-   - CodiMD, n8n, and Outline all share the same inbound port `443` behind Caddy
-   - Open WebUI is published through Cloudflare's edge, whose source addresses are shared infrastructure rather than a per-site allowlist you can model at the Azure NSG layer
-   - Because of those two facts, NSG rules can allow or deny transport, but they cannot meaningfully express "allow only this one hostname" for the HTTPS sites
+   - CodiMD, n8n, Outline, and Open WebUI all share the same inbound port `443` behind Caddy
+   - Because Cloudflare edge IP addresses are shared infrastructure across all proxied domains, transport-layer NSG rules cannot distinguish between hostnames or filter by visitor IP behind Cloudflare
+   - Caddy performs hostname-scoped source-IP filtering using the validated `CF-Connecting-IP` header from trusted Cloudflare proxies, leaving other hostnames unaffected
 
 5. **Shared Entra app registration for CodiMD and Outline** ⚠️:
 
@@ -614,11 +664,19 @@ Back up secrets separately in an approved secret manager: `OPENWEBUI_SECRET_KEY`
 - Check containers: `docker compose ps`
 - Review logs: `docker compose logs -f`
 
-### Cloudflare Tunnel / Open WebUI route issues
-- Check `docker compose logs cloudflared`
-- Verify the public hostname is routed to `http://open-webui:8080`
-- Verify DNS is the tunnel-managed CNAME, not an `A` record to the VM public IP
-- Confirm `open-webui` and `cloudflared` do not publish host ports
+### Open WebUI returns 403
+- **Check your visitor IP**: Visit `https://cloudflare.com/cdn-cgi/trace` and check the `ip=` field. Confirm whether your request arrives via IPv4 or IPv6.
+- **Check `OPENWEBUI_ALLOWED_IPS`**: Verify `src/.env` contains your current IP address or CIDR range. Multiple ranges must be space-separated.
+- **Did you restart or recreate Caddy?**: After editing `.env`, always run `docker compose up -d caddy`. Running `docker compose restart caddy` does not reload environment variables from `.env`.
+- **Cloudflare header settings**:
+  - In Cloudflare dashboard, confirm "Remove visitor IP headers" is **Off**.
+  - Confirm "Pseudo IPv4" is **not** set to "Overwrite Headers".
+- **Caddyfile parsing and validation**: An empty or malformed `OPENWEBUI_ALLOWED_IPS` will cause Caddy configuration parsing to fail, affecting all reverse-proxied sites. Test configuration with:
+  ```bash
+  docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+  ```
+- **Direct origin access**: Direct HTTP/HTTPS requests to the VM public IP without going through Cloudflare will return 403 unless your client's direct peer IP is in `OPENWEBUI_ALLOWED_IPS`.
+- **Locked out recovery**: If your IP changed and you cannot reach Open WebUI, use Azure Run Command to update `OPENWEBUI_ALLOWED_IPS` (see the script in the Access control and DNS section).
 
 ### Microsoft OAuth redirect mismatch
 - Verify `OPENWEBUI_DOMAIN` matches the public hostname exactly

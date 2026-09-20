@@ -20,6 +20,8 @@ services:
       - CODIMD_DOMAIN=${CODIMD_DOMAIN}
       - N8N_DOMAIN=${N8N_DOMAIN}
       - OUTLINE_DOMAIN=${OUTLINE_DOMAIN}
+      - OPENWEBUI_DOMAIN=${OPENWEBUI_DOMAIN}
+      - OPENWEBUI_ALLOWED_IPS=${OPENWEBUI_ALLOWED_IPS}
     networks:
       - web
 
@@ -271,19 +273,6 @@ services:
     volumes:
       - ${DATA_ROOT}/open-webui/data:/app/backend/data
     mem_limit: ${OPENWEBUI_MEM_LIMIT:-1024m}
-    networks:
-      - web
-
-  # Cloudflare Tunnel
-  cloudflared:
-    image: cloudflare/cloudflared:2026.9.1
-    restart: always
-    command:
-      - tunnel
-      - --no-autoupdate
-      - run
-      - --token
-      - ${CLOUDFLARED_TUNNEL_TOKEN}
     networks:
       - web
 
