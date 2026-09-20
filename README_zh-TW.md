@@ -288,6 +288,7 @@ Open WebUI 經由 Caddy 發布，並透過來源 IP 允許清單進行存取控�
    在 Cloudflare 管理介面中，為 Open WebUI 子網域 (例如 `openweb` 或與 `OPENWEBUI_DOMAIN` 相符的名稱) 新增一筆指向 VM 公用 IP 的 **A** 紀錄。Proxy 狀態必須設為 **Proxied** (橘色雲朵)，與既有的 CodiMD、n8n 及 Outline DNS 紀錄相同。
 
 2. **允許清單設定 (`OPENWEBUI_ALLOWED_IPS`)**：
+   - `OPENWEBUI_DOMAIN` 為 **必填**。若留空或缺少此值，Open WebUI server block 會因沒有 site address 而使 Caddy 驗證失敗；這可能阻止共用的 Caddy 啟動或重新載入，並影響所有反向代理站點。
    - 在 `src/.env` 中，將 `OPENWEBUI_ALLOWED_IPS` 設定為以空格分隔的 IPv4/IPv6 位址或 CIDR 範圍 (例如 `203.0.113.10/32` 或 `203.0.113.10/32 198.51.100.0/24`)。
    - 至 `https://cloudflare.com/cdn-cgi/trace` 查詢目前的來源 IP (`ip=` 欄位)。若您的網路環境使用 IPv6，且流量經由 IPv6 傳送，請一併加入相應的 IPv6 位址或前綴。
    - **Fail-closed 風險**：`OPENWEBUI_ALLOWED_IPS` 為 **必填**。展開後的值若為空或未定義，設定仍可通過驗證，但不含任何允許範圍，因此所有 Open WebUI 請求都會收到 `403 Forbidden`。格式錯誤的 IP/CIDR 會使 Caddy 驗證失敗，並可能阻止 Caddy 啟動或重新載入，影響 **所有** 反向代理站點 (CodiMD、n8n、Outline 與 Open WebUI)。
@@ -317,25 +318,49 @@ Open WebUI 經由 Caddy 發布，並透過來源 IP 允許清單進行存取控�
 6. **IP 變動被鎖在外面時的復原方式 (Azure Run Command)**：
    若外網 IP 變更而收到 403 被阻擋，可透過已登入 Azure CLI 的機器執行 Run Command 更新 `.env`，無需依賴 SSH 或 Web 存取：
    ```powershell
-   $newIp = '<新公網 IP>/32'   # 至 https://cloudflare.com/cdn-cgi/trace 查看 ip=
-   $script = @"
-   set -eu
-   cd /path/to/CommonVM/src
-   OWNER=`$(stat -c '%U:%G' .env)
-   cp -a .env "`$HOME/env-backup-`$(date +%Y%m%d%H%M%S).env"
-   sed -i 's|^OPENWEBUI_ALLOWED_IPS=.*|OPENWEBUI_ALLOWED_IPS=$newIp|' .env
-   chown "`$OWNER" .env
-   chmod 600 .env
-   docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-   docker compose up -d caddy
-   grep -n '^OPENWEBUI_ALLOWED_IPS=' .env
-"@
+   $newIp = '<your-new-ip>/32'   # Check https://cloudflare.com/cdn-cgi/trace for ip=
+   if ($newIp -notmatch '^[0-9A-Fa-f:.]+(?:/\d{1,3})?$') {
+       throw 'Enter one IPv4 or IPv6 address, optionally followed by a CIDR prefix.'
+   }
+   $scriptLines = @(
+       "NEW_IP='$newIp'"
+       'set -euo pipefail'
+       'cd /path/to/CommonVM/src'
+       'ENV_FILE=.env'
+       'test -f "$ENV_FILE"'
+       'ENV_OWNER=$(stat -c ''%u:%g'' "$ENV_FILE")'
+       'ENV_MODE=$(stat -c ''%a'' "$ENV_FILE")'
+       'ENV_BACKUP="$HOME/env-backup-$(date +%Y%m%d%H%M%S).env"'
+       'ENV_DIR=$(dirname -- "$ENV_FILE")'
+       'ENV_BASE=$(basename -- "$ENV_FILE")'
+       'ENV_TMP=$(mktemp --tmpdir="$ENV_DIR" ".${ENV_BASE}.XXXXXX")'
+       'trap ''rm -f -- "$ENV_TMP"'' EXIT'
+       'cp -a -- "$ENV_FILE" "$ENV_BACKUP"'
+       'if grep -q ''^OPENWEBUI_ALLOWED_IPS='' "$ENV_FILE"; then'
+       '  awk -v value="$NEW_IP" ''BEGIN { replaced=0 } /^OPENWEBUI_ALLOWED_IPS=/ { if (!replaced) print "OPENWEBUI_ALLOWED_IPS=" value; replaced=1; next } { print }'' "$ENV_FILE" > "$ENV_TMP"'
+       'else'
+       '  awk -v value="$NEW_IP" ''{ print } END { print "OPENWEBUI_ALLOWED_IPS=" value }'' "$ENV_FILE" > "$ENV_TMP"'
+       'fi'
+       'test -s "$ENV_TMP"'
+       'test "$(grep -c ''^OPENWEBUI_ALLOWED_IPS='' "$ENV_TMP")" -eq 1'
+       'OPENWEBUI_ALLOWED_IPS="$NEW_IP" docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile'
+       'chown "$ENV_OWNER" "$ENV_TMP"'
+       'chmod "$ENV_MODE" "$ENV_TMP"'
+       'mv -- "$ENV_TMP" "$ENV_FILE"'
+       'trap - EXIT'
+       'test "$(stat -c ''%u:%g'' "$ENV_FILE")" = "$ENV_OWNER"'
+       'test "$(stat -c ''%a'' "$ENV_FILE")" = "$ENV_MODE"'
+       'docker compose up -d caddy'
+       'grep -n ''^OPENWEBUI_ALLOWED_IPS='' "$ENV_FILE"'
+       'printf ''Backup retained at %s\n'' "$ENV_BACKUP"'
+   )
+   $script = $scriptLines -join "`n"
    $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
    az vm run-command invoke --subscription '<subscription-id>' `
      --resource-group '<resource-group>' --name '<vm-name>' --command-id RunShellScript `
      --scripts "printf '%s' '$payload' | base64 -d | bash" --query "value[0].message" -o tsv
    ```
-   注意：`sed -i` 會重建檔案，需執行 `chown "$OWNER" .env` 與 `chmod 600 .env` 以保持原有擁有者與權限。
+   PowerShell 字串陣列會以 LF 字元串接，因此即使 README checkout 使用 CRLF，Base64 解碼後的 Linux 腳本仍可直接執行。若 `OPENWEBUI_ALLOWED_IPS` 不存在，腳本會安全附加此設定；若已存在，則更新既有項目並移除重複項。腳本會先驗證候選值，再取代 `.env`，保留原本的 numeric owner 與 mode、留下保留 metadata 的備份，且只輸出 allowlist 項目與備份路徑，不會輸出 secrets。
 
 7. **退役舊版 Cloudflare Tunnel (僅適用既有部署)**：
    在下列所有 Caddy 路徑驗證完成前，請保持舊 tunnel 持續運作。
@@ -372,6 +397,12 @@ Open WebUI 經由 Caddy 發布，並透過來源 IP 允許清單進行存取控�
    - 允許的來源可進入 Open WebUI Microsoft Entra 登入流程。
    - Microsoft Entra 登入成功，且 Open WebUI 核心功能正常。
    - 被拒絕的來源與未列入允許清單的 direct-origin 請求皆收到 `403 Forbidden`。
+
+   最終刪除 tunnel 前，先到 **Cloudflare Zero Trust → Access → Applications** 檢查是否有與 Open WebUI 完整 hostname 相符的 application。不要假設該資源存在：production Access application／policy 可能從未建立或送出。
+
+   - 若沒有相符的 application，記錄檢查結果後繼續。
+   - 若舊版 Cloudflare Access application 存在，先保留或匯出其 application 與 policy 設定，再停用或移除。
+   - 完成變更後，以全新 private／無 Cookie 的瀏覽器工作階段重新執行允許與拒絕來源檢查。刪除 tunnel 前，確認預期結果是由 Caddy 而非 Cloudflare Access 登入或拒絕頁面回傳。
 
    **只有在每項檢查都成功後**，才依先前保存的容器 ID 停止並移除已驗證的容器：
 
@@ -418,24 +449,38 @@ Open WebUI 經由 Caddy 發布，並透過來源 IP 允許清單進行存取控�
    unset ENV_FILE ENV_DIR ENV_BASE ENV_OWNER ENV_MODE ENV_BACKUP ENV_TMP
    ```
 
-   最後，使用正確的 Cloudflare 帳戶完成 Wrangler 驗證、列出 remote named tunnels，並明確選擇要退役的 tunnel。Tunnel 名稱在帳戶內唯一，但刪除時仍應使用 `tunnel info` 顯示的 UUID，並在執行前確認名稱：
+   最後，使用正確的 Cloudflare 帳戶完成 Wrangler 驗證、列出 remote named tunnels，並明確選擇要退役的 tunnel。Tunnel 名稱在帳戶內唯一，但刪除時仍應使用 `tunnel info` 顯示的 UUID，並在執行前確認名稱。
+
+   只有目前機器需要指定 npm registry 時才設定 `REGISTRY`。Microsoft 企業工作站必須使用下列 proxy；其他環境應改用其核准的 registry，或不設定 `REGISTRY` 以沿用既有 npm 預設值：
 
    ```bash
-   export npm_config_registry='https://packagefeedproxy.microsoft.io/npm/'
-   npx --yes wrangler@latest tunnel list
+   # Microsoft corporate workstations only
+   REGISTRY='https://packagefeedproxy.microsoft.io/npm/'
+   ```
+
+   ```bash
+   run_wrangler() {
+     if [ -n "${REGISTRY:-}" ]; then
+       npm_config_registry="$REGISTRY" npx --yes wrangler@latest "$@"
+     else
+       npx --yes wrangler@latest "$@"
+     fi
+   }
+   run_wrangler tunnel list
    read -r -p 'Exact legacy tunnel name from the list: ' LEGACY_TUNNEL_NAME
    test -n "$LEGACY_TUNNEL_NAME"
-   TUNNEL_INFO=$(npx --yes wrangler@latest tunnel info "$LEGACY_TUNNEL_NAME")
+   TUNNEL_INFO=$(run_wrangler tunnel info "$LEGACY_TUNNEL_NAME")
    printf '%s\n' "$TUNNEL_INFO"
    RESOLVED_TUNNEL_NAME=$(printf '%s\n' "$TUNNEL_INFO" | sed -n 's/^[[:space:]]*Name:[[:space:]]*//p')
    LEGACY_TUNNEL_ID=$(printf '%s\n' "$TUNNEL_INFO" | sed -n 's/^[[:space:]]*ID:[[:space:]]*//p')
    test "$RESOLVED_TUNNEL_NAME" = "$LEGACY_TUNNEL_NAME"
    test -n "$LEGACY_TUNNEL_ID"
-   npx --yes wrangler@latest tunnel info "$LEGACY_TUNNEL_ID"
+   run_wrangler tunnel info "$LEGACY_TUNNEL_ID"
    read -r -p "Type DELETE $RESOLVED_TUNNEL_NAME to confirm: " CONFIRM
    test "$CONFIRM" = "DELETE $RESOLVED_TUNNEL_NAME"
-   npx --yes wrangler@latest tunnel delete "$LEGACY_TUNNEL_ID"
-   unset LEGACY_TUNNEL_NAME TUNNEL_INFO RESOLVED_TUNNEL_NAME LEGACY_TUNNEL_ID CONFIRM npm_config_registry
+   run_wrangler tunnel delete "$LEGACY_TUNNEL_ID"
+   unset -f run_wrangler
+   unset REGISTRY LEGACY_TUNNEL_NAME TUNNEL_INFO RESOLVED_TUNNEL_NAME LEGACY_TUNNEL_ID CONFIRM
    ```
 
 8. **選配硬化**：

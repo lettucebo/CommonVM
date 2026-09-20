@@ -291,6 +291,7 @@ Open WebUI is published through Caddy with a source-IP allowlist:
    In your Cloudflare dashboard, add an **A** record for the Open WebUI subdomain (e.g., `openweb` matching `OPENWEBUI_DOMAIN`) pointing to the VM public IP. Ensure the proxy status is **Proxied** (orange cloud), matching the existing CodiMD, n8n, and Outline DNS records.
 
 2. **Allowlist configuration (`OPENWEBUI_ALLOWED_IPS`)**:
+   - `OPENWEBUI_DOMAIN` is **required**. If it is empty or missing, Caddy validation fails because the Open WebUI server block has no site address; this can prevent the shared Caddy instance from starting or reloading and affect every proxied site.
    - In `src/.env`, set `OPENWEBUI_ALLOWED_IPS` to space-separated IPv4 or IPv6 addresses or CIDR ranges (e.g. `203.0.113.10/32` or `203.0.113.10/32 198.51.100.0/24`).
    - Find your current public IP by visiting `https://cloudflare.com/cdn-cgi/trace` and copying the `ip=` field. If your network provides IPv6, ensure you include the relevant IPv6 address/prefix if your traffic routes over IPv6.
    - **Fail-closed risk**: `OPENWEBUI_ALLOWED_IPS` is **required**. An empty or missing expanded value validates but contains no allowed ranges, so Caddy returns `403 Forbidden` for every Open WebUI request. A malformed IP/CIDR fails Caddy validation and can prevent Caddy from starting or reloading, affecting **all** reverse-proxied sites (CodiMD, n8n, Outline, and Open WebUI).
@@ -321,24 +322,48 @@ Open WebUI is published through Caddy with a source-IP allowlist:
    If your client IP changes and you are locked out with a 403, update `OPENWEBUI_ALLOWED_IPS` using Azure Run Command without needing SSH or web access:
    ```powershell
    $newIp = '<your-new-ip>/32'   # Check https://cloudflare.com/cdn-cgi/trace for ip=
-   $script = @"
-   set -eu
-   cd /path/to/CommonVM/src
-   OWNER=`$(stat -c '%U:%G' .env)
-   cp -a .env "`$HOME/env-backup-`$(date +%Y%m%d%H%M%S).env"
-   sed -i 's|^OPENWEBUI_ALLOWED_IPS=.*|OPENWEBUI_ALLOWED_IPS=$newIp|' .env
-   chown "`$OWNER" .env
-   chmod 600 .env
-   docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-   docker compose up -d caddy
-   grep -n '^OPENWEBUI_ALLOWED_IPS=' .env
-"@
+   if ($newIp -notmatch '^[0-9A-Fa-f:.]+(?:/\d{1,3})?$') {
+       throw 'Enter one IPv4 or IPv6 address, optionally followed by a CIDR prefix.'
+   }
+   $scriptLines = @(
+       "NEW_IP='$newIp'"
+       'set -euo pipefail'
+       'cd /path/to/CommonVM/src'
+       'ENV_FILE=.env'
+       'test -f "$ENV_FILE"'
+       'ENV_OWNER=$(stat -c ''%u:%g'' "$ENV_FILE")'
+       'ENV_MODE=$(stat -c ''%a'' "$ENV_FILE")'
+       'ENV_BACKUP="$HOME/env-backup-$(date +%Y%m%d%H%M%S).env"'
+       'ENV_DIR=$(dirname -- "$ENV_FILE")'
+       'ENV_BASE=$(basename -- "$ENV_FILE")'
+       'ENV_TMP=$(mktemp --tmpdir="$ENV_DIR" ".${ENV_BASE}.XXXXXX")'
+       'trap ''rm -f -- "$ENV_TMP"'' EXIT'
+       'cp -a -- "$ENV_FILE" "$ENV_BACKUP"'
+       'if grep -q ''^OPENWEBUI_ALLOWED_IPS='' "$ENV_FILE"; then'
+       '  awk -v value="$NEW_IP" ''BEGIN { replaced=0 } /^OPENWEBUI_ALLOWED_IPS=/ { if (!replaced) print "OPENWEBUI_ALLOWED_IPS=" value; replaced=1; next } { print }'' "$ENV_FILE" > "$ENV_TMP"'
+       'else'
+       '  awk -v value="$NEW_IP" ''{ print } END { print "OPENWEBUI_ALLOWED_IPS=" value }'' "$ENV_FILE" > "$ENV_TMP"'
+       'fi'
+       'test -s "$ENV_TMP"'
+       'test "$(grep -c ''^OPENWEBUI_ALLOWED_IPS='' "$ENV_TMP")" -eq 1'
+       'OPENWEBUI_ALLOWED_IPS="$NEW_IP" docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile'
+       'chown "$ENV_OWNER" "$ENV_TMP"'
+       'chmod "$ENV_MODE" "$ENV_TMP"'
+       'mv -- "$ENV_TMP" "$ENV_FILE"'
+       'trap - EXIT'
+       'test "$(stat -c ''%u:%g'' "$ENV_FILE")" = "$ENV_OWNER"'
+       'test "$(stat -c ''%a'' "$ENV_FILE")" = "$ENV_MODE"'
+       'docker compose up -d caddy'
+       'grep -n ''^OPENWEBUI_ALLOWED_IPS='' "$ENV_FILE"'
+       'printf ''Backup retained at %s\n'' "$ENV_BACKUP"'
+   )
+   $script = $scriptLines -join "`n"
    $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
    az vm run-command invoke --subscription '<subscription-id>' `
      --resource-group '<resource-group>' --name '<vm-name>' --command-id RunShellScript `
      --scripts "printf '%s' '$payload' | base64 -d | bash" --query "value[0].message" -o tsv
    ```
-   Notice that `sed -i` recreates the file; `chown "$OWNER" .env` and `chmod 600 .env` preserve ownership and permissions.
+   The PowerShell string array is joined with LF characters, so the decoded Linux script remains executable even when the README checkout uses CRLF. If `OPENWEBUI_ALLOWED_IPS` is absent, the script appends it safely; otherwise, it replaces the existing entry and removes duplicates. It validates the candidate value before replacing `.env`, preserves the original numeric owner and mode, keeps a metadata-preserving backup, and prints only the allowlist entry and backup path—not secrets.
 
 7. **Retire a legacy Cloudflare Tunnel (existing deployments only)**:
    Keep the old tunnel running until the Caddy path has passed every verification below.
@@ -375,6 +400,12 @@ Open WebUI is published through Caddy with a source-IP allowlist:
    - An allowed source reaches the Open WebUI Microsoft Entra sign-in flow.
    - Microsoft Entra sign-in succeeds and core Open WebUI functionality works.
    - A denied source and a non-allowlisted direct-origin request receive `403 Forbidden`.
+
+   Before final tunnel deletion, check **Cloudflare Zero Trust → Access → Applications** for an application matching the exact Open WebUI hostname. Do not assume one exists: the production Access application/policy may never have been created or submitted.
+
+   - If no matching application exists, record that result and continue.
+   - If a matching legacy Cloudflare Access application exists, preserve or export its application and policy settings, then disable or remove it.
+   - After that change, use a fresh private/no-cookie browser session to repeat the allowed- and denied-source checks. Confirm Caddy, not Cloudflare Access, returns the expected behavior before deleting the tunnel.
 
    **Only after every check succeeds**, stop and remove the previously verified container by its captured ID:
 
@@ -421,24 +452,38 @@ Open WebUI is published through Caddy with a source-IP allowlist:
    unset ENV_FILE ENV_DIR ENV_BASE ENV_OWNER ENV_MODE ENV_BACKUP ENV_TMP
    ```
 
-   Finally, authenticate Wrangler for the correct Cloudflare account, list the remote named tunnels, and select the intended tunnel explicitly. Tunnel names are account-unique, but use the UUID shown by `tunnel info` for deletion and confirm the name before proceeding:
+   Finally, authenticate Wrangler for the correct Cloudflare account, list the remote named tunnels, and select the intended tunnel explicitly. Tunnel names are account-unique, but use the UUID shown by `tunnel info` for deletion and confirm the name before proceeding.
+
+   Set `REGISTRY` only when the current machine requires a specific npm registry. Microsoft corporate workstations must use the following proxy; other environments should set their approved registry or leave `REGISTRY` unset to use their existing npm default:
 
    ```bash
-   export npm_config_registry='https://packagefeedproxy.microsoft.io/npm/'
-   npx --yes wrangler@latest tunnel list
+   # Microsoft corporate workstations only
+   REGISTRY='https://packagefeedproxy.microsoft.io/npm/'
+   ```
+
+   ```bash
+   run_wrangler() {
+     if [ -n "${REGISTRY:-}" ]; then
+       npm_config_registry="$REGISTRY" npx --yes wrangler@latest "$@"
+     else
+       npx --yes wrangler@latest "$@"
+     fi
+   }
+   run_wrangler tunnel list
    read -r -p 'Exact legacy tunnel name from the list: ' LEGACY_TUNNEL_NAME
    test -n "$LEGACY_TUNNEL_NAME"
-   TUNNEL_INFO=$(npx --yes wrangler@latest tunnel info "$LEGACY_TUNNEL_NAME")
+   TUNNEL_INFO=$(run_wrangler tunnel info "$LEGACY_TUNNEL_NAME")
    printf '%s\n' "$TUNNEL_INFO"
    RESOLVED_TUNNEL_NAME=$(printf '%s\n' "$TUNNEL_INFO" | sed -n 's/^[[:space:]]*Name:[[:space:]]*//p')
    LEGACY_TUNNEL_ID=$(printf '%s\n' "$TUNNEL_INFO" | sed -n 's/^[[:space:]]*ID:[[:space:]]*//p')
    test "$RESOLVED_TUNNEL_NAME" = "$LEGACY_TUNNEL_NAME"
    test -n "$LEGACY_TUNNEL_ID"
-   npx --yes wrangler@latest tunnel info "$LEGACY_TUNNEL_ID"
+   run_wrangler tunnel info "$LEGACY_TUNNEL_ID"
    read -r -p "Type DELETE $RESOLVED_TUNNEL_NAME to confirm: " CONFIRM
    test "$CONFIRM" = "DELETE $RESOLVED_TUNNEL_NAME"
-   npx --yes wrangler@latest tunnel delete "$LEGACY_TUNNEL_ID"
-   unset LEGACY_TUNNEL_NAME TUNNEL_INFO RESOLVED_TUNNEL_NAME LEGACY_TUNNEL_ID CONFIRM npm_config_registry
+   run_wrangler tunnel delete "$LEGACY_TUNNEL_ID"
+   unset -f run_wrangler
+   unset REGISTRY LEGACY_TUNNEL_NAME TUNNEL_INFO RESOLVED_TUNNEL_NAME LEGACY_TUNNEL_ID CONFIRM
    ```
 
 8. **Optional hardening**:

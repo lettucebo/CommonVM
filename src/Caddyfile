@@ -81,6 +81,9 @@
 }
 
 # Open WebUI
+# OPENWEBUI_DOMAIN is required. If it expands to an empty or missing value,
+# Caddy validation fails because this server block has no site address, which
+# can prevent the shared reverse proxy from starting or reloading.
 {$OPENWEBUI_DOMAIN} {
     # Network allowlist. Open WebUI's Entra ID login remains the identity boundary.
     #
