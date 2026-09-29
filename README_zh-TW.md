@@ -689,6 +689,182 @@ _如果本來就有足夠 headroom，可能還是比您的咖啡癮便宜。☕_
 
 schema migration 之後，盲目回退舊 image tag 可能不安全。若升級後失敗，請改用已驗證的升級前備份還原，不要假設前一版 image 一定能安全讀取新資料。
 
+#### n8n 與 PostgreSQL 主版本升級
+
+只升級專用的 `n8n-db` 與 `n8n`；絕不可執行全專案的 `docker compose pull` 或 `up`，因為其他服務包含浮動 tag。CodiMD 使用獨立的 `codimd-db`，不得停止、升級或還原它。
+
+1. **確認範圍與名稱。** 在 `src/` 執行；Compose 專案名稱固定為 `src`：
+
+   ```bash
+   docker compose -f docker-compose.yml config --services
+   docker compose -f docker-compose.yml ps --all
+   grep -n 'n8n-db' docker-compose.yml
+   ```
+
+   確認只有 `n8n` service 參照 `n8n-db`，並記下 `ps` 顯示的實際容器名稱（通常是 `src-n8n-1` 與 `src-n8n-db-1`）。後續每次 `docker exec` 或還原都要使用 Compose 顯示的名稱。在已驗證的工作站產生唯一且不含機密的 `STAMP`，備份目錄與工作站快照名稱都使用同一個值。Azure Run Command 可能沒有 `$HOME`；若必須推算使用者 home，請使用既有的 `stat`/`getent` 慣例。
+
+   ```bash
+   STAMP=$(date -u +%Y%m%d-%H%M%S)
+   printf 'Use this non-secret STAMP for the VM backup and workstation snapshots: %s\n' "$STAMP"
+   ```
+
+2. **停止 n8n，並在遷移前建立權限受限且已驗證的備份。** 只停止 n8n，接著在 VM 的 Compose 目錄執行以下指令。將上方產生的同一個 `STAMP` 帶入；絕不可印出 `.env` 或 secret 值。
+
+   ```bash
+   set -euo pipefail
+   docker compose -f docker-compose.yml stop n8n
+   umask 077
+   STAMP="REPLACE_WITH_STAMP"
+   BACKUP="/mnt/data/backup/${STAMP}/n8n"
+   DB_CONTAINER="src-n8n-db-1" # Replace with the name confirmed by docker compose ps.
+   install -d -m 700 "$BACKUP"
+
+   docker exec "$DB_CONTAINER" pg_dump -U n8n -d n8n -Fc \
+     > "$BACKUP/n8n.dump"
+   docker exec "$DB_CONTAINER" pg_dump -U n8n -d n8n -Fp \
+     > "$BACKUP/n8n.sql"
+   docker exec "$DB_CONTAINER" pg_dumpall -U n8n --globals-only \
+     > "$BACKUP/n8n-globals.sql"
+   sudo tar czf "$BACKUP/n8n-data.tar.gz" -C /mnt/data/n8n data
+   sudo chown "$(id -u):$(id -g)" "$BACKUP/n8n-data.tar.gz"
+   install -m 600 docker-compose.yml "$BACKUP/docker-compose.yml"
+   install -m 600 .env "$BACKUP/.env"
+   chmod 600 "$BACKUP"/*
+
+   sha256sum "$BACKUP/n8n.dump" "$BACKUP/n8n.sql" \
+     "$BACKUP/n8n-globals.sql" "$BACKUP/n8n-data.tar.gz" \
+     "$BACKUP/docker-compose.yml" "$BACKUP/.env" > "$BACKUP/SHA256SUMS"
+   chmod 600 "$BACKUP/SHA256SUMS"
+   sha256sum -c "$BACKUP/SHA256SUMS"
+   test -s "$BACKUP/n8n.sql"
+   tar tzf "$BACKUP/n8n-data.tar.gz" > /dev/null
+   docker exec -i "$DB_CONTAINER" pg_restore --list \
+     < "$BACKUP/n8n.dump" > /dev/null
+   ```
+
+   在碰觸正式資料庫前，先將 custom dump 還原測試到**全新且隔離的 PostgreSQL 18.6 容器**。保留測試目錄、容器與下載的 image 供調查；絕不可重用既有 restore-check 路徑或刪除 image。產生不會印出的臨時密碼。測試資料掛載在 PostgreSQL 18 的 `/var/lib/postgresql` volume 根目錄，備份則以唯讀方式掛載：
+
+   ```bash
+   set -euo pipefail
+   STAMP="REPLACE_WITH_STAMP"
+   BACKUP="/mnt/data/backup/${STAMP}/n8n"
+   CHECK_DIR="/mnt/data/restore-check/${STAMP}/n8n-pg18"
+   CHECK_CONTAINER="n8n-pg18-restore-check-${STAMP}"
+   DB_CONTAINER="src-n8n-db-1" # Replace with the name confirmed by docker compose ps.
+   test ! -e "$CHECK_DIR" || { echo "Restore-check path already exists; stop."; exit 1; }
+   sudo install -d -m 700 -o 70 -g 70 "$CHECK_DIR/pg"
+   export POSTGRES_PASSWORD
+   POSTGRES_PASSWORD=$(openssl rand -hex 32)
+   docker run -d --name "$CHECK_CONTAINER" --network none \
+     -e POSTGRES_USER=n8n -e POSTGRES_PASSWORD -e POSTGRES_DB=n8n \
+     -v "$CHECK_DIR/pg:/var/lib/postgresql" \
+     -v "$BACKUP:/backup:ro" postgres:18.6-alpine
+   for attempt in $(seq 1 60); do
+     if docker exec "$CHECK_CONTAINER" pg_isready -h 127.0.0.1 -U n8n -d n8n; then
+       break
+     fi
+     sleep 2
+   done
+   docker exec "$CHECK_CONTAINER" pg_isready -h 127.0.0.1 -U n8n -d n8n
+   docker exec "$CHECK_CONTAINER" pg_restore -U n8n -d n8n \
+     --no-owner --no-privileges --exit-on-error /backup/n8n.dump
+   ```
+
+   在來源與還原資料庫記錄**精確**的使用者資料表 row count，並比較檔案。globals dump 另行保留；隔離容器已由環境變數建立 `n8n` role。
+
+   ```bash
+   set -euo pipefail
+   STAMP="REPLACE_WITH_STAMP"
+   BACKUP="/mnt/data/backup/${STAMP}/n8n"
+   CHECK_DIR="/mnt/data/restore-check/${STAMP}/n8n-pg18"
+   CHECK_CONTAINER="n8n-pg18-restore-check-${STAMP}"
+   count_rows() {
+     container=$1
+     docker exec "$container" psql -U n8n -d n8n -Atc \
+       "SELECT format('SELECT %L, count(*) FROM %I.%I;', schemaname || '.' || tablename, schemaname, tablename) FROM pg_tables WHERE schemaname NOT LIKE 'pg_%' AND schemaname <> 'information_schema' ORDER BY 1" \
+       | docker exec -i "$container" psql -U n8n -d n8n -At -F '|'
+   }
+   count_rows "$DB_CONTAINER" > "$BACKUP/n8n-row-counts.tsv"
+   count_rows "$CHECK_CONTAINER" > "$CHECK_DIR/n8n-row-counts.tsv"
+   diff -u "$BACKUP/n8n-row-counts.tsv" "$CHECK_DIR/n8n-row-counts.tsv"
+   docker stop "$CHECK_CONTAINER"
+   ```
+
+3. **資料庫停止時建立 Azure 兩顆磁碟的快照。** 備份與還原測試通過後，在 VM 上只停止 `n8n-db`。在已驗證的工作站使用相同的 `STAMP` 與資源群組 `COMMON`。檢查 VM 的受控磁碟**資源 ID**，並明確選出 data disk ID；不可用模糊的磁碟名稱判斷來源。
+
+   ```bash
+   set -euo pipefail
+   VM_NAME="REPLACE_WITH_VM_RESOURCE_NAME"
+   STAMP="REPLACE_WITH_STAMP"
+   az vm show -g COMMON -n "$VM_NAME" \
+     --query '{osDisk:storageProfile.osDisk.managedDisk.id,dataDisks:storageProfile.dataDisks[].managedDisk.id}' \
+     -o json
+   OS_DISK_ID="REPLACE_WITH_EXACT_OS_DISK_RESOURCE_ID"
+   DATA_DISK_ID="REPLACE_WITH_EXACT_DATA_DISK_RESOURCE_ID"
+   OS_SNAPSHOT="n8n-pg18-os-${STAMP}"
+   DATA_SNAPSHOT="n8n-pg18-data-${STAMP}"
+   az snapshot create -g COMMON -n "$OS_SNAPSHOT" \
+     --source "$OS_DISK_ID" --incremental true --output none
+   az snapshot create -g COMMON -n "$DATA_SNAPSHOT" \
+     --source "$DATA_DISK_ID" --incremental true --output none
+   for SNAPSHOT in "$OS_SNAPSHOT" "$DATA_SNAPSHOT"; do
+     STATE=$(az snapshot show -g COMMON -n "$SNAPSHOT" \
+       --query provisioningState -o tsv)
+     test "$STATE" = Succeeded
+   done
+   ```
+
+   兩個快照狀態都必須是 `Succeeded` 才能繼續。保留兩個快照與所有備份產物。
+
+4. **還原至新的 PostgreSQL 18 資料目錄，再通過舊版 n8n 閘門。** 只套用 PostgreSQL Compose 變更：將 `n8n-db` 設為 `postgres:18.6-alpine`，並將 `${DATA_ROOT}/n8n/pg` 掛載到 `/var/lib/postgresql`，同時加入 healthcheck 與健康依賴。維持 n8n image pinned 為 `n8nio/n8n:2.32.5`；通過閘門前不要改為 `2.40.7`。保留 `/mnt/data/n8n/db`；絕不可將 PG14 的實體資料檔複製到 PG18 目錄。在 VM 上建立此前未使用的 `/mnt/data/n8n/pg`，並設為 PG18 容器 `postgres` UID/GID 所有（此 Alpine image 為 `70:70`），且只啟動 `n8n-db`。image 預設 `PGDATA` 為 `/var/lib/postgresql/18/docker`：
+
+   ```bash
+   set -euo pipefail
+   test ! -e /mnt/data/n8n/pg || { echo "PG18 path already exists; stop."; exit 1; }
+   sudo install -d -m 700 -o 70 -g 70 /mnt/data/n8n/pg
+   docker compose -f docker-compose.yml pull n8n-db
+   docker compose -f docker-compose.yml up -d n8n-db
+   docker compose -f docker-compose.yml ps n8n-db
+   docker compose -f docker-compose.yml logs --tail=100 n8n-db
+   ```
+
+   確認新的資料庫容器健康，並在還原前核對其實際名稱。在 VM shell 重新宣告下方的變數與 `count_rows` 函式，將 `REPLACE_WITH_STAMP` 換成備份所用的相同值。此區塊會在錯誤時停止；restore、row-count 指令或比較任一失敗時都不會啟動 n8n。將 logical custom dump 還原至已初始化的 `n8n` 資料庫，再與已保存的 PG14 row count 比較精確筆數。n8n 維持 `2.32.5`，並驗證資料庫／應用程式健康狀態與 logs、n8n migrations、workflows、credentials、triggers 以及 webhook。此閘門通過前不得升級至 `2.40.7`。
+
+   ```bash
+   set -euo pipefail
+   STAMP="REPLACE_WITH_STAMP"
+   BACKUP="/mnt/data/backup/${STAMP}/n8n"
+   CHECK_DIR="/mnt/data/restore-check/${STAMP}/n8n-pg18"
+   DB_CONTAINER="src-n8n-db-1" # Replace if docker compose ps shows another name.
+   test -s "$BACKUP/n8n.dump"
+   docker exec "$DB_CONTAINER" pg_isready -h 127.0.0.1 -U n8n -d n8n
+   count_rows() {
+     container=$1
+     docker exec "$container" psql -U n8n -d n8n -Atc \
+       "SELECT format('SELECT %L, count(*) FROM %I.%I;', schemaname || '.' || tablename, schemaname, tablename) FROM pg_tables WHERE schemaname NOT LIKE 'pg_%' AND schemaname <> 'information_schema' ORDER BY 1" \
+       | docker exec -i "$container" psql -U n8n -d n8n -At -F '|'
+   }
+   docker exec -i "$DB_CONTAINER" pg_restore -U n8n -d n8n \
+     --no-owner --no-privileges --exit-on-error < "$BACKUP/n8n.dump"
+   count_rows "$DB_CONTAINER" > "$CHECK_DIR/live-n8n-row-counts.tsv"
+   diff -u "$BACKUP/n8n-row-counts.tsv" "$CHECK_DIR/live-n8n-row-counts.tsv"
+   docker compose -f docker-compose.yml up -d n8n
+   docker compose -f docker-compose.yml ps n8n n8n-db
+   docker compose -f docker-compose.yml logs --tail=200 n8n n8n-db
+   ```
+
+   閘門通過後才將 n8n image 改為 `n8nio/n8n:2.40.7`，接著只拉取並重建 n8n。重新檢查 health/logs、n8n 資料庫 migration 結果、workflows、credentials、triggers 與 webhook。保留舊資料庫目錄、restore-check 目錄、快照、備份，以及新舊 images；絕不可 prune 或刪除它們。
+
+   ```bash
+   set -euo pipefail
+   docker compose -f docker-compose.yml pull n8n
+   docker compose -f docker-compose.yml up -d --no-deps n8n
+   docker compose -f docker-compose.yml ps n8n n8n-db
+   docker compose -f docker-compose.yml logs --tail=200 n8n
+   ```
+
+5. **回復限制。** 絕不可讓已遷移資料庫搭配降版後的 n8n。若需回復，先在 PG18 可讀時保留並 dump PG18，接著只停止 n8n 與 n8n-db，再還原升級前的 Compose 與 PostgreSQL 14 資料目錄。PG18 上的寫入不會出現在 PG14。若 PG18 無法 dump，請原樣保留 `/mnt/data/n8n/pg` 供後續調查。不得刪除備份、快照、restore-check 檔案或 images。
+
 ### 監控
 
 1. 檢查容器狀態：
