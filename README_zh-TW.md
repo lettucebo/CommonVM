@@ -712,12 +712,15 @@ schema migration 之後，盲目回退舊 image tag 可能不安全。若升級�
 
    ```bash
    set -euo pipefail
-   docker compose -f docker-compose.yml stop n8n
+   set -o noclobber
+   cd /path/to/CommonVM/src
    umask 077
    STAMP="REPLACE_WITH_STAMP"
-   BACKUP="/mnt/data/backup/${STAMP}/n8n"
+   BACKUP="/mnt/data/backup/n8n-upgrade-${STAMP}"
    DB_CONTAINER="src-n8n-db-1" # Replace with the name confirmed by docker compose ps.
-   install -d -m 700 "$BACKUP"
+   test -d /mnt/data/backup || install -d -m 700 /mnt/data/backup
+   mkdir -m 700 -- "$BACKUP"
+   docker compose -f docker-compose.yml stop n8n
 
    docker exec "$DB_CONTAINER" pg_dump -U n8n -d n8n -Fc \
      > "$BACKUP/n8n.dump"
@@ -746,12 +749,14 @@ schema migration 之後，盲目回退舊 image tag 可能不安全。若升級�
 
    ```bash
    set -euo pipefail
+   set -o noclobber
    STAMP="REPLACE_WITH_STAMP"
-   BACKUP="/mnt/data/backup/${STAMP}/n8n"
+   BACKUP="/mnt/data/backup/n8n-upgrade-${STAMP}"
    CHECK_DIR="/mnt/data/restore-check/${STAMP}/n8n-pg18"
    CHECK_CONTAINER="n8n-pg18-restore-check-${STAMP}"
    DB_CONTAINER="src-n8n-db-1" # Replace with the name confirmed by docker compose ps.
    test ! -e "$CHECK_DIR" || { echo "Restore-check path already exists; stop."; exit 1; }
+   install -d -m 700 "$CHECK_DIR"
    sudo install -d -m 700 -o 70 -g 70 "$CHECK_DIR/pg"
    export POSTGRES_PASSWORD
    POSTGRES_PASSWORD=$(openssl rand -hex 32)
@@ -770,14 +775,16 @@ schema migration 之後，盲目回退舊 image tag 可能不安全。若升級�
      --no-owner --no-privileges --exit-on-error /backup/n8n.dump
    ```
 
-   在來源與還原資料庫記錄**精確**的使用者資料表 row count，並比較檔案。globals dump 另行保留；隔離容器已由環境變數建立 `n8n` role。
+   在來源與還原資料庫記錄**精確**的使用者資料表 row count，並比較檔案。兩個 count 檔都寫在由操作人員擁有的目錄中；只有 `pg` 子目錄由 UID/GID `70:70` 擁有。globals dump 另行保留；隔離容器已由環境變數建立 `n8n` role。
 
    ```bash
    set -euo pipefail
+   set -o noclobber
    STAMP="REPLACE_WITH_STAMP"
-   BACKUP="/mnt/data/backup/${STAMP}/n8n"
+   BACKUP="/mnt/data/backup/n8n-upgrade-${STAMP}"
    CHECK_DIR="/mnt/data/restore-check/${STAMP}/n8n-pg18"
    CHECK_CONTAINER="n8n-pg18-restore-check-${STAMP}"
+   DB_CONTAINER="src-n8n-db-1" # Replace with the name confirmed by docker compose ps.
    count_rows() {
      container=$1
      docker exec "$container" psql -U n8n -d n8n -Atc \
@@ -790,7 +797,17 @@ schema migration 之後，盲目回退舊 image tag 可能不安全。若升級�
    docker stop "$CHECK_CONTAINER"
    ```
 
-3. **資料庫停止時建立 Azure 兩顆磁碟的快照。** 備份與還原測試通過後，在 VM 上只停止 `n8n-db`。在已驗證的工作站使用相同的 `STAMP` 與資源群組 `COMMON`。檢查 VM 的受控磁碟**資源 ID**，並明確選出 data disk ID；不可用模糊的磁碟名稱判斷來源。
+3. **資料庫停止時建立 Azure 兩顆磁碟的快照。** 備份與還原測試通過後，在 VM 的 Compose 目錄只停止 `n8n-db`，並在執行工作站快照指令前確認它已停止。在已驗證的工作站使用相同的 `STAMP` 與資源群組 `COMMON`。檢查 VM 的受控磁碟**資源 ID**，並明確選出 data disk ID；不可用模糊的磁碟名稱判斷來源。
+
+   在 VM 執行：
+
+   ```bash
+   set -euo pipefail
+   cd /path/to/CommonVM/src
+   docker compose -f docker-compose.yml stop n8n-db
+   docker compose -f docker-compose.yml ps --all n8n-db
+   test -z "$(docker compose -f docker-compose.yml ps --status running -q n8n-db)"
+   ```
 
    ```bash
    set -euo pipefail
@@ -816,10 +833,34 @@ schema migration 之後，盲目回退舊 image tag 可能不安全。若升級�
 
    兩個快照狀態都必須是 `Succeeded` 才能繼續。保留兩個快照與所有備份產物。
 
-4. **還原至新的 PostgreSQL 18 資料目錄，再通過舊版 n8n 閘門。** 只套用 PostgreSQL Compose 變更：將 `n8n-db` 設為 `postgres:18.6-alpine`，並將 `${DATA_ROOT}/n8n/pg` 掛載到 `/var/lib/postgresql`，同時加入 healthcheck 與健康依賴。維持 n8n image pinned 為 `n8nio/n8n:2.32.5`；通過閘門前不要改為 `2.40.7`。保留 `/mnt/data/n8n/db`；絕不可將 PG14 的實體資料檔複製到 PG18 目錄。在 VM 上建立此前未使用的 `/mnt/data/n8n/pg`，並設為 PG18 容器 `postgres` UID/GID 所有（此 Alpine image 為 `70:70`），且只啟動 `n8n-db`。image 預設 `PGDATA` 為 `/var/lib/postgresql/18/docker`：
+4. **還原至新的 PostgreSQL 18 資料目錄，再通過舊版 n8n 閘門。** 還原前先在 VM 擷取升級分支，並只以核准的 C1 檔案取代 `src/docker-compose.yml`。此步只會以單一檔案取代，不得切換或重設整個工作樹，也不得修改 `.env`。C1 保持 n8n 為 `n8nio/n8n:2.32.5`；啟動 n8n 前確認此版本存在且 `2.40.7` 不存在。保留 `/mnt/data/n8n/db`；絕不可將 PG14 的實體資料檔複製到 PG18 目錄。在 VM 上建立此前未使用的 `/mnt/data/n8n/pg`，並設為 PG18 容器 `postgres` UID/GID 所有（此 Alpine image 為 `70:70`），且只啟動 `n8n-db`。image 預設 `PGDATA` 為 `/var/lib/postgresql/18/docker`：
+
+   在 VM repository 根目錄執行：
 
    ```bash
    set -euo pipefail
+   cd /path/to/CommonVM
+   git fetch origin feat/n8n-pg18-upgrade
+   COMPOSE_COMMIT=e8718b9a398699c8d84e7318b8bee87bf4815e46
+   git cat-file -e "${COMPOSE_COMMIT}^{commit}"
+   COMPOSE_TMP=$(mktemp src/.docker-compose.yml.XXXXXX)
+   trap 'rm -f -- "$COMPOSE_TMP"' EXIT
+   git show "${COMPOSE_COMMIT}:src/docker-compose.yml" > "$COMPOSE_TMP"
+   chmod --reference=src/docker-compose.yml "$COMPOSE_TMP"
+   mv -f -- "$COMPOSE_TMP" src/docker-compose.yml
+   trap - EXIT
+   cd src
+   docker compose -f docker-compose.yml config --quiet
+   grep -F 'image: n8nio/n8n:2.32.5' docker-compose.yml
+   if grep -Fq 'image: n8nio/n8n:2.40.7' docker-compose.yml; then
+     echo "C1 Compose unexpectedly contains n8n 2.40.7; stop."
+     exit 1
+   fi
+   ```
+
+   ```bash
+   set -euo pipefail
+   cd /path/to/CommonVM/src
    test ! -e /mnt/data/n8n/pg || { echo "PG18 path already exists; stop."; exit 1; }
    sudo install -d -m 700 -o 70 -g 70 /mnt/data/n8n/pg
    docker compose -f docker-compose.yml pull n8n-db
@@ -832,11 +873,22 @@ schema migration 之後，盲目回退舊 image tag 可能不安全。若升級�
 
    ```bash
    set -euo pipefail
+   set -o noclobber
+   cd /path/to/CommonVM/src
    STAMP="REPLACE_WITH_STAMP"
-   BACKUP="/mnt/data/backup/${STAMP}/n8n"
+   BACKUP="/mnt/data/backup/n8n-upgrade-${STAMP}"
    CHECK_DIR="/mnt/data/restore-check/${STAMP}/n8n-pg18"
    DB_CONTAINER="src-n8n-db-1" # Replace if docker compose ps shows another name.
    test -s "$BACKUP/n8n.dump"
+   READY=0
+   for attempt in $(seq 1 60); do
+     if docker exec "$DB_CONTAINER" pg_isready -h 127.0.0.1 -U n8n -d n8n >/dev/null; then
+       READY=1
+       break
+     fi
+     sleep 2
+   done
+   test "$READY" -eq 1 || { echo "PostgreSQL did not become ready; stop."; exit 1; }
    docker exec "$DB_CONTAINER" pg_isready -h 127.0.0.1 -U n8n -d n8n
    count_rows() {
      container=$1
@@ -848,22 +900,63 @@ schema migration 之後，盲目回退舊 image tag 可能不安全。若升級�
      --no-owner --no-privileges --exit-on-error < "$BACKUP/n8n.dump"
    count_rows "$DB_CONTAINER" > "$CHECK_DIR/live-n8n-row-counts.tsv"
    diff -u "$BACKUP/n8n-row-counts.tsv" "$CHECK_DIR/live-n8n-row-counts.tsv"
+   grep -F 'image: n8nio/n8n:2.32.5' docker-compose.yml
+   if grep -Fq 'image: n8nio/n8n:2.40.7' docker-compose.yml; then
+     echo "n8n is not pinned to 2.32.5; do not start n8n."
+     exit 1
+   fi
    docker compose -f docker-compose.yml up -d n8n
    docker compose -f docker-compose.yml ps n8n n8n-db
    docker compose -f docker-compose.yml logs --tail=200 n8n n8n-db
    ```
 
-   閘門通過後才將 n8n image 改為 `n8nio/n8n:2.40.7`，接著只拉取並重建 n8n。重新檢查 health/logs、n8n 資料庫 migration 結果、workflows、credentials、triggers 與 webhook。保留舊資料庫目錄、restore-check 目錄、快照、備份，以及新舊 images；絕不可 prune 或刪除它們。
+   Gate B 通過後，擷取升級分支並只以核准的 C2 檔案取代 `src/docker-compose.yml`。確認它將 n8n 固定為 `n8nio/n8n:2.40.7` 後，再只拉取並重建 n8n。重新檢查 health/logs、n8n 資料庫 migration 結果、workflows、credentials、triggers 與 webhook。保留舊資料庫目錄、restore-check 目錄、快照、備份，以及新舊 images；絕不可 prune 或刪除它們。
 
    ```bash
    set -euo pipefail
+   cd /path/to/CommonVM
+   git fetch origin feat/n8n-pg18-upgrade
+   COMPOSE_COMMIT=4e591ab000c8ff1a070db88286382707f7003ccf
+   git cat-file -e "${COMPOSE_COMMIT}^{commit}"
+   COMPOSE_TMP=$(mktemp src/.docker-compose.yml.XXXXXX)
+   trap 'rm -f -- "$COMPOSE_TMP"' EXIT
+   git show "${COMPOSE_COMMIT}:src/docker-compose.yml" > "$COMPOSE_TMP"
+   chmod --reference=src/docker-compose.yml "$COMPOSE_TMP"
+   mv -f -- "$COMPOSE_TMP" src/docker-compose.yml
+   trap - EXIT
+   cd src
+   docker compose -f docker-compose.yml config --quiet
+   grep -F 'image: n8nio/n8n:2.40.7' docker-compose.yml
+   if grep -Fq 'image: n8nio/n8n:2.32.5' docker-compose.yml; then
+     echo "C2 Compose unexpectedly contains n8n 2.32.5; stop."
+     exit 1
+   fi
    docker compose -f docker-compose.yml pull n8n
    docker compose -f docker-compose.yml up -d --no-deps n8n
    docker compose -f docker-compose.yml ps n8n n8n-db
    docker compose -f docker-compose.yml logs --tail=200 n8n
+   test "$(docker inspect --format '{{.Config.Image}}' "$(docker compose -f docker-compose.yml ps -q n8n)")" = n8nio/n8n:2.40.7
    ```
 
-5. **回復限制。** 絕不可讓已遷移資料庫搭配降版後的 n8n。若需回復，先在 PG18 可讀時保留並 dump PG18，接著只停止 n8n 與 n8n-db，再還原升級前的 Compose 與 PostgreSQL 14 資料目錄。PG18 上的寫入不會出現在 PG14。若 PG18 無法 dump，請原樣保留 `/mnt/data/n8n/pg` 供後續調查。不得刪除備份、快照、restore-check 檔案或 images。
+5. **回復限制。** 絕不可讓已遷移資料庫搭配降版後的 n8n。若需回復，先在 PG18 可讀時保留並 dump PG18，接著只停止 n8n 與 n8n-db，再還原 PostgreSQL 14 資料目錄。若要還原 baseline Compose，請擷取升級分支，再從下方精確的 baseline commit 原子取代 `src/docker-compose.yml`；不得切換或重設工作樹，也不得修改 `.env`。PG18 上的寫入不會出現在 PG14。若 PG18 無法 dump，請原樣保留 `/mnt/data/n8n/pg` 供後續調查。不得刪除備份、快照、restore-check 檔案或 images。
+
+   在 VM repository 根目錄執行：
+
+   ```bash
+   set -euo pipefail
+   cd /path/to/CommonVM
+   git fetch origin feat/n8n-pg18-upgrade
+   COMPOSE_COMMIT=a4f80d74159cbff2fe850f38fc1fddc92072b270
+   git cat-file -e "${COMPOSE_COMMIT}^{commit}"
+   COMPOSE_TMP=$(mktemp src/.docker-compose.yml.XXXXXX)
+   trap 'rm -f -- "$COMPOSE_TMP"' EXIT
+   git show "${COMPOSE_COMMIT}:src/docker-compose.yml" > "$COMPOSE_TMP"
+   chmod --reference=src/docker-compose.yml "$COMPOSE_TMP"
+   mv -f -- "$COMPOSE_TMP" src/docker-compose.yml
+   trap - EXIT
+   cd src
+   docker compose -f docker-compose.yml config --quiet
+   ```
 
 ### 監控
 
