@@ -849,7 +849,7 @@ Upgrade only `n8n-db` and `n8n`; never run project-wide `docker compose pull` or
    git cat-file -e "${COMPOSE_COMMIT}^{commit}"
    COMPOSE_TMP=$(mktemp src/.docker-compose.yml.XXXXXX)
    trap 'rm -f -- "$COMPOSE_TMP"' EXIT
-   git show "${COMPOSE_COMMIT}:src/docker-compose.yml" > "$COMPOSE_TMP"
+   git show "${COMPOSE_COMMIT}:src/docker-compose.yml" >| "$COMPOSE_TMP"
    chmod --reference=src/docker-compose.yml "$COMPOSE_TMP"
    mv -f -- "$COMPOSE_TMP" src/docker-compose.yml
    trap - EXIT
@@ -924,7 +924,7 @@ Upgrade only `n8n-db` and `n8n`; never run project-wide `docker compose pull` or
    git cat-file -e "${COMPOSE_COMMIT}^{commit}"
    COMPOSE_TMP=$(mktemp src/.docker-compose.yml.XXXXXX)
    trap 'rm -f -- "$COMPOSE_TMP"' EXIT
-   git show "${COMPOSE_COMMIT}:src/docker-compose.yml" > "$COMPOSE_TMP"
+   git show "${COMPOSE_COMMIT}:src/docker-compose.yml" >| "$COMPOSE_TMP"
    chmod --reference=src/docker-compose.yml "$COMPOSE_TMP"
    mv -f -- "$COMPOSE_TMP" src/docker-compose.yml
    trap - EXIT
@@ -954,7 +954,7 @@ Upgrade only `n8n-db` and `n8n`; never run project-wide `docker compose pull` or
    git cat-file -e "${COMPOSE_COMMIT}^{commit}"
    COMPOSE_TMP=$(mktemp src/.docker-compose.yml.XXXXXX)
    trap 'rm -f -- "$COMPOSE_TMP"' EXIT
-   git show "${COMPOSE_COMMIT}:src/docker-compose.yml" > "$COMPOSE_TMP"
+   git show "${COMPOSE_COMMIT}:src/docker-compose.yml" >| "$COMPOSE_TMP"
    chmod --reference=src/docker-compose.yml "$COMPOSE_TMP"
    mv -f -- "$COMPOSE_TMP" src/docker-compose.yml
    trap - EXIT

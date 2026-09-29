@@ -845,7 +845,7 @@ schema migration 之後，盲目回退舊 image tag 可能不安全。若升級�
    git cat-file -e "${COMPOSE_COMMIT}^{commit}"
    COMPOSE_TMP=$(mktemp src/.docker-compose.yml.XXXXXX)
    trap 'rm -f -- "$COMPOSE_TMP"' EXIT
-   git show "${COMPOSE_COMMIT}:src/docker-compose.yml" > "$COMPOSE_TMP"
+   git show "${COMPOSE_COMMIT}:src/docker-compose.yml" >| "$COMPOSE_TMP"
    chmod --reference=src/docker-compose.yml "$COMPOSE_TMP"
    mv -f -- "$COMPOSE_TMP" src/docker-compose.yml
    trap - EXIT
@@ -920,7 +920,7 @@ schema migration 之後，盲目回退舊 image tag 可能不安全。若升級�
    git cat-file -e "${COMPOSE_COMMIT}^{commit}"
    COMPOSE_TMP=$(mktemp src/.docker-compose.yml.XXXXXX)
    trap 'rm -f -- "$COMPOSE_TMP"' EXIT
-   git show "${COMPOSE_COMMIT}:src/docker-compose.yml" > "$COMPOSE_TMP"
+   git show "${COMPOSE_COMMIT}:src/docker-compose.yml" >| "$COMPOSE_TMP"
    chmod --reference=src/docker-compose.yml "$COMPOSE_TMP"
    mv -f -- "$COMPOSE_TMP" src/docker-compose.yml
    trap - EXIT
@@ -950,7 +950,7 @@ schema migration 之後，盲目回退舊 image tag 可能不安全。若升級�
    git cat-file -e "${COMPOSE_COMMIT}^{commit}"
    COMPOSE_TMP=$(mktemp src/.docker-compose.yml.XXXXXX)
    trap 'rm -f -- "$COMPOSE_TMP"' EXIT
-   git show "${COMPOSE_COMMIT}:src/docker-compose.yml" > "$COMPOSE_TMP"
+   git show "${COMPOSE_COMMIT}:src/docker-compose.yml" >| "$COMPOSE_TMP"
    chmod --reference=src/docker-compose.yml "$COMPOSE_TMP"
    mv -f -- "$COMPOSE_TMP" src/docker-compose.yml
    trap - EXIT
