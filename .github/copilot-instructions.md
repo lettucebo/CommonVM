@@ -26,10 +26,14 @@ directory's path. Always confirm real names with `docker compose ps` before any
   DBs, never exposed publicly). RustDesk (`hbbs`/`hbbr`) intentionally uses `network_mode: host`
   and is NOT proxied by Caddy — it needs raw TCP 21114-21119 / UDP 21116.
 - **Caddy** terminates TLS (Let's Encrypt) and reverse-proxies `CODIMD_DOMAIN→codimd:3000`,
-  `N8N_DOMAIN→n8n:5678`. Each app has its own pinned Postgres (`codimd-db` 11.6, `n8n-db` 14).
+  `N8N_DOMAIN→n8n:5678`. Each app has its own pinned Postgres (`codimd-db` 11.6,
+  `n8n-db` 18.6, `outline-db` 17.11). PostgreSQL 18's data volume is mounted at
+  `/var/lib/postgresql` to match its version-specific `PGDATA` layout.
 - **All persistent data lives under `${DATA_ROOT}` (default `/mnt/data`)** — the Azure data disk.
   Never store data on the temporary disk; it is wiped on reboot. Host folders need specific UIDs:
-  n8n = `1000:1000`, codimd = `1500:1500`.
+  n8n application data (`n8n/data`) = `1000:1000`, PostgreSQL 18 data
+  (`n8n/pg`) = `70:70`, codimd = `1500:1500`. Never recursively chown
+  `${DATA_ROOT}/n8n` or modify the preserved PG14 rollback directory (`n8n/db`).
 
 ## Conventions
 
