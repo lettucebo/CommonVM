@@ -950,6 +950,9 @@ schema migration 之後，盲目回退舊 image tag 可能不安全。若升級�
    STAMP="REPLACE_WITH_STAMP"
    BACKUP="/mnt/data/backup/n8n-upgrade-${STAMP}"
    test -d "$BACKUP"
+   COMPOSE_COMMIT=a4f80d74159cbff2fe850f38fc1fddc92072b270
+   git cat-file -e "${COMPOSE_COMMIT}^{commit}"
+   test "$(sudo cat /mnt/data/n8n/db/PG_VERSION)" = 14
    cd src
    docker compose -f docker-compose.yml stop n8n
    DB_CONTAINER=$(docker compose -f docker-compose.yml ps -q n8n-db)
@@ -972,10 +975,7 @@ schema migration 之後，盲目回退舊 image tag 可能不安全。若升級�
      echo "No running PG18 container found; preserve /mnt/data/n8n/pg if present." >&2
    fi
    docker compose -f docker-compose.yml stop n8n-db
-   test "$(cat /mnt/data/n8n/db/PG_VERSION)" = 14
    cd ..
-   COMPOSE_COMMIT=a4f80d74159cbff2fe850f38fc1fddc92072b270
-   git cat-file -e "${COMPOSE_COMMIT}^{commit}"
    COMPOSE_TMP=$(mktemp src/.docker-compose.yml.XXXXXX)
    trap 'rm -f -- "$COMPOSE_TMP"' EXIT
    git show "${COMPOSE_COMMIT}:src/docker-compose.yml" >| "$COMPOSE_TMP"
