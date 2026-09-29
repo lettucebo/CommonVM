@@ -749,7 +749,7 @@ Upgrade only `n8n-db` and `n8n`; never run project-wide `docker compose pull` or
      < "$BACKUP/n8n.dump" > /dev/null
    ```
 
-   Restore-test the custom dump in a **new, isolated PostgreSQL 18.6 container** before touching the live database. Keep its directory, container, and downloaded image for investigation; never reuse an existing restore-check path or delete the image. Generate a temporary password without printing it. Mount the test data at PostgreSQL 18's `/var/lib/postgresql` volume root, and mount the backup read-only:
+   Restore-test the custom dump in a **new, isolated PostgreSQL 18.6 container** before touching the live database. Keep its directory, container, and downloaded image for investigation; never reuse an existing restore-check path or delete the image. Generate a temporary password without printing it. Mount the test data at PostgreSQL 18's `/var/lib/postgresql` volume root. Stream the dump from the host over stdin: the backup directory is mode 0700 and cannot be read by the container's `postgres` user.
 
    ```bash
    set -euo pipefail
@@ -766,8 +766,7 @@ Upgrade only `n8n-db` and `n8n`; never run project-wide `docker compose pull` or
    POSTGRES_PASSWORD=$(openssl rand -hex 32)
    docker run -d --name "$CHECK_CONTAINER" --network none \
      -e POSTGRES_USER=n8n -e POSTGRES_PASSWORD -e POSTGRES_DB=n8n \
-     -v "$CHECK_DIR/pg:/var/lib/postgresql" \
-     -v "$BACKUP:/backup:ro" postgres:18.6-alpine
+     -v "$CHECK_DIR/pg:/var/lib/postgresql" postgres:18.6-alpine
    for attempt in $(seq 1 60); do
      if docker exec "$CHECK_CONTAINER" pg_isready -h 127.0.0.1 -U n8n -d n8n; then
        break
@@ -775,8 +774,8 @@ Upgrade only `n8n-db` and `n8n`; never run project-wide `docker compose pull` or
      sleep 2
    done
    docker exec "$CHECK_CONTAINER" pg_isready -h 127.0.0.1 -U n8n -d n8n
-   docker exec "$CHECK_CONTAINER" pg_restore -U n8n -d n8n \
-     --no-owner --no-privileges --exit-on-error /backup/n8n.dump
+   docker exec -i "$CHECK_CONTAINER" pg_restore -U n8n -d n8n \
+     --no-owner --no-privileges --exit-on-error < "$BACKUP/n8n.dump"
    ```
 
    Record **exact** user-table row counts on the source and restored database, then compare the files. Both count files are written under directories owned by the operator; only the `pg` child is owned by UID/GID `70:70`. The globals dump is retained separately; the isolated container already creates the `n8n` role from its environment.

@@ -745,7 +745,7 @@ schema migration 之後，盲目回退舊 image tag 可能不安全。若升級�
      < "$BACKUP/n8n.dump" > /dev/null
    ```
 
-   在碰觸正式資料庫前，先將 custom dump 還原測試到**全新且隔離的 PostgreSQL 18.6 容器**。保留測試目錄、容器與下載的 image 供調查；絕不可重用既有 restore-check 路徑或刪除 image。產生不會印出的臨時密碼。測試資料掛載在 PostgreSQL 18 的 `/var/lib/postgresql` volume 根目錄，備份則以唯讀方式掛載：
+   在碰觸正式資料庫前，先將 custom dump 還原測試到**全新且隔離的 PostgreSQL 18.6 容器**。保留測試目錄、容器與下載的 image 供調查；絕不可重用既有 restore-check 路徑或刪除 image。產生不會印出的臨時密碼，測試資料掛載在 PostgreSQL 18 的 `/var/lib/postgresql` volume 根目錄。備份目錄的權限為 0700，容器中的 `postgres` 無法直接讀取；改由主機透過 stdin 傳入 dump。
 
    ```bash
    set -euo pipefail
@@ -762,8 +762,7 @@ schema migration 之後，盲目回退舊 image tag 可能不安全。若升級�
    POSTGRES_PASSWORD=$(openssl rand -hex 32)
    docker run -d --name "$CHECK_CONTAINER" --network none \
      -e POSTGRES_USER=n8n -e POSTGRES_PASSWORD -e POSTGRES_DB=n8n \
-     -v "$CHECK_DIR/pg:/var/lib/postgresql" \
-     -v "$BACKUP:/backup:ro" postgres:18.6-alpine
+     -v "$CHECK_DIR/pg:/var/lib/postgresql" postgres:18.6-alpine
    for attempt in $(seq 1 60); do
      if docker exec "$CHECK_CONTAINER" pg_isready -h 127.0.0.1 -U n8n -d n8n; then
        break
@@ -771,8 +770,8 @@ schema migration 之後，盲目回退舊 image tag 可能不安全。若升級�
      sleep 2
    done
    docker exec "$CHECK_CONTAINER" pg_isready -h 127.0.0.1 -U n8n -d n8n
-   docker exec "$CHECK_CONTAINER" pg_restore -U n8n -d n8n \
-     --no-owner --no-privileges --exit-on-error /backup/n8n.dump
+   docker exec -i "$CHECK_CONTAINER" pg_restore -U n8n -d n8n \
+     --no-owner --no-privileges --exit-on-error < "$BACKUP/n8n.dump"
    ```
 
    在來源與還原資料庫記錄**精確**的使用者資料表 row count，並比較檔案。兩個 count 檔都寫在由操作人員擁有的目錄中；只有 `pg` 子目錄由 UID/GID `70:70` 擁有。globals dump 另行保留；隔離容器已由環境變數建立 `n8n` role。
