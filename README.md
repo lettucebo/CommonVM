@@ -902,6 +902,7 @@ Upgrade only `n8n-db` and `n8n`; never run project-wide `docker compose pull` or
    }
    docker exec -i "$DB_CONTAINER" pg_restore -U n8n -d n8n \
      --no-owner --no-privileges --exit-on-error < "$BACKUP/n8n.dump"
+   docker exec "$DB_CONTAINER" vacuumdb -U n8n -d n8n --analyze-in-stages
    count_rows "$DB_CONTAINER" > "$CHECK_DIR/live-n8n-row-counts.tsv"
    diff -u "$BACKUP/n8n-row-counts.tsv" "$CHECK_DIR/live-n8n-row-counts.tsv"
    grep -F 'image: n8nio/n8n:2.32.5' docker-compose.yml
@@ -942,14 +943,41 @@ Upgrade only `n8n-db` and `n8n`; never run project-wide `docker compose pull` or
    test "$(docker inspect --format '{{.Config.Image}}' "$(docker compose -f docker-compose.yml ps -q n8n)")" = n8nio/n8n:2.40.7
    ```
 
-5. **Rollback limits.** Never downgrade n8n against a database already migrated by the newer n8n version. If rollback is required, preserve and dump PG18 first if it is readable, stop only n8n and n8n-db, and restore the PostgreSQL 14 database directory. To restore the baseline Compose file, fetch the upgrade branch and atomically replace only `src/docker-compose.yml` from the exact baseline commit below; do not check out/reset the worktree or touch `.env`. Writes made on PG18 will not exist in PG14. If PG18 cannot be dumped, leave `/mnt/data/n8n/pg` untouched for later investigation. Do not delete backups, snapshots, restore-check files, or images.
+5. **Rollback limits.** Never downgrade n8n against a database already migrated by the newer n8n version. Stop n8n first and dump PG18 if it is readable. If it cannot be dumped, report this explicitly and keep its data directory untouched for investigation. Stop only n8n and n8n-db, then reattach the **unchanged** PostgreSQL 14 directory `/mnt/data/n8n/db` by restoring the baseline Compose file; never copy files over it. The baseline commit must already exist locally, so rollback does not rely on a network fetch. Do not check out/reset the worktree or touch `.env`. Writes made on PG18 will not exist in PG14. Do not delete backups, snapshots, restore-check files, or images.
 
    From the VM repository root:
 
    ```bash
    set -euo pipefail
+   set -o noclobber
    cd /path/to/CommonVM
-   git fetch origin feat/n8n-pg18-upgrade
+   STAMP="REPLACE_WITH_STAMP"
+   BACKUP="/mnt/data/backup/n8n-upgrade-${STAMP}"
+   test -d "$BACKUP"
+   cd src
+   docker compose -f docker-compose.yml stop n8n
+   DB_CONTAINER=$(docker compose -f docker-compose.yml ps -q n8n-db)
+   if [ -n "$DB_CONTAINER" ] &&
+      [ "$(docker inspect --format '{{.Config.Image}}' "$DB_CONTAINER")" = postgres:18.6-alpine ]; then
+     if docker exec "$DB_CONTAINER" pg_isready -U n8n -d n8n >/dev/null; then
+       ROLLBACK_DUMP="$BACKUP/n8n-pg18-at-rollback-$(date +%Y%m%d-%H%M%S)-$$.dump"
+       test ! -e "$ROLLBACK_DUMP"
+       if docker exec "$DB_CONTAINER" pg_dump -U n8n -d n8n -Fc > "$ROLLBACK_DUMP"; then
+         sha256sum "$ROLLBACK_DUMP" > "$ROLLBACK_DUMP.sha256"
+         chmod 600 "$ROLLBACK_DUMP" "$ROLLBACK_DUMP.sha256"
+         echo "PG18 rollback dump preserved."
+       else
+         echo "PG18 dump failed; preserve /mnt/data/n8n/pg for investigation." >&2
+       fi
+     else
+       echo "PG18 is unreadable; preserve /mnt/data/n8n/pg for investigation." >&2
+     fi
+   else
+     echo "No running PG18 container found; preserve /mnt/data/n8n/pg if present." >&2
+   fi
+   docker compose -f docker-compose.yml stop n8n-db
+   test "$(cat /mnt/data/n8n/db/PG_VERSION)" = 14
+   cd ..
    COMPOSE_COMMIT=a4f80d74159cbff2fe850f38fc1fddc92072b270
    git cat-file -e "${COMPOSE_COMMIT}^{commit}"
    COMPOSE_TMP=$(mktemp src/.docker-compose.yml.XXXXXX)
@@ -960,6 +988,27 @@ Upgrade only `n8n-db` and `n8n`; never run project-wide `docker compose pull` or
    trap - EXIT
    cd src
    docker compose -f docker-compose.yml config --quiet
+   grep -F 'image: postgres:14.23-alpine' docker-compose.yml
+   grep -F '/n8n/db:/var/lib/postgresql/data' docker-compose.yml
+   grep -F 'image: n8nio/n8n:2.32.5' docker-compose.yml
+   docker compose -f docker-compose.yml up -d --no-deps n8n-db
+   DB_CONTAINER=$(docker compose -f docker-compose.yml ps -q n8n-db)
+   test -n "$DB_CONTAINER"
+   test "$(docker inspect --format '{{.Config.Image}}' "$DB_CONTAINER")" = postgres:14.23-alpine
+   test "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Source}}{{end}}{{end}}' "$DB_CONTAINER")" = /mnt/data/n8n/db
+   READY=0
+   for attempt in $(seq 1 60); do
+     if docker exec "$DB_CONTAINER" pg_isready -U n8n -d n8n >/dev/null; then
+       READY=1
+       break
+     fi
+     sleep 2
+   done
+   test "$READY" -eq 1 || { echo "PostgreSQL 14 did not become ready; stop."; exit 1; }
+   docker compose -f docker-compose.yml up -d --no-deps n8n
+   N8N_CONTAINER=$(docker compose -f docker-compose.yml ps -q n8n)
+   test "$(docker exec "$N8N_CONTAINER" n8n --version)" = 2.32.5
+   docker compose -f docker-compose.yml ps n8n n8n-db
    ```
 
 ### Monitoring

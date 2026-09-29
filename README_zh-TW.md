@@ -898,6 +898,7 @@ schema migration 之後，盲目回退舊 image tag 可能不安全。若升級�
    }
    docker exec -i "$DB_CONTAINER" pg_restore -U n8n -d n8n \
      --no-owner --no-privileges --exit-on-error < "$BACKUP/n8n.dump"
+   docker exec "$DB_CONTAINER" vacuumdb -U n8n -d n8n --analyze-in-stages
    count_rows "$DB_CONTAINER" > "$CHECK_DIR/live-n8n-row-counts.tsv"
    diff -u "$BACKUP/n8n-row-counts.tsv" "$CHECK_DIR/live-n8n-row-counts.tsv"
    grep -F 'image: n8nio/n8n:2.32.5' docker-compose.yml
@@ -938,14 +939,41 @@ schema migration 之後，盲目回退舊 image tag 可能不安全。若升級�
    test "$(docker inspect --format '{{.Config.Image}}' "$(docker compose -f docker-compose.yml ps -q n8n)")" = n8nio/n8n:2.40.7
    ```
 
-5. **回復限制。** 絕不可讓已遷移資料庫搭配降版後的 n8n。若需回復，先在 PG18 可讀時保留並 dump PG18，接著只停止 n8n 與 n8n-db，再還原 PostgreSQL 14 資料目錄。若要還原 baseline Compose，請擷取升級分支，再從下方精確的 baseline commit 原子取代 `src/docker-compose.yml`；不得切換或重設工作樹，也不得修改 `.env`。PG18 上的寫入不會出現在 PG14。若 PG18 無法 dump，請原樣保留 `/mnt/data/n8n/pg` 供後續調查。不得刪除備份、快照、restore-check 檔案或 images。
+5. **回復限制。** 絕不可讓已遷移資料庫搭配降版後的 n8n。先停止 n8n；若 PG18 可讀，則先將其 dump 保存。若無法 dump，需明確回報並原樣保留資料目錄供調查。只停止 n8n 與 n8n-db，再透過還原 baseline Compose 重新掛載**未修改的** PostgreSQL 14 目錄 `/mnt/data/n8n/db`；絕不可複製檔案覆蓋它。baseline commit 必須已存在本機，回復不依賴網路 fetch。不得切換或重設工作樹，也不得修改 `.env`。PG18 上的寫入不會出現在 PG14。不得刪除備份、快照、restore-check 檔案或 images。
 
    在 VM repository 根目錄執行：
 
    ```bash
    set -euo pipefail
+   set -o noclobber
    cd /path/to/CommonVM
-   git fetch origin feat/n8n-pg18-upgrade
+   STAMP="REPLACE_WITH_STAMP"
+   BACKUP="/mnt/data/backup/n8n-upgrade-${STAMP}"
+   test -d "$BACKUP"
+   cd src
+   docker compose -f docker-compose.yml stop n8n
+   DB_CONTAINER=$(docker compose -f docker-compose.yml ps -q n8n-db)
+   if [ -n "$DB_CONTAINER" ] &&
+      [ "$(docker inspect --format '{{.Config.Image}}' "$DB_CONTAINER")" = postgres:18.6-alpine ]; then
+     if docker exec "$DB_CONTAINER" pg_isready -U n8n -d n8n >/dev/null; then
+       ROLLBACK_DUMP="$BACKUP/n8n-pg18-at-rollback-$(date +%Y%m%d-%H%M%S)-$$.dump"
+       test ! -e "$ROLLBACK_DUMP"
+       if docker exec "$DB_CONTAINER" pg_dump -U n8n -d n8n -Fc > "$ROLLBACK_DUMP"; then
+         sha256sum "$ROLLBACK_DUMP" > "$ROLLBACK_DUMP.sha256"
+         chmod 600 "$ROLLBACK_DUMP" "$ROLLBACK_DUMP.sha256"
+         echo "PG18 rollback dump preserved."
+       else
+         echo "PG18 dump failed; preserve /mnt/data/n8n/pg for investigation." >&2
+       fi
+     else
+       echo "PG18 is unreadable; preserve /mnt/data/n8n/pg for investigation." >&2
+     fi
+   else
+     echo "No running PG18 container found; preserve /mnt/data/n8n/pg if present." >&2
+   fi
+   docker compose -f docker-compose.yml stop n8n-db
+   test "$(cat /mnt/data/n8n/db/PG_VERSION)" = 14
+   cd ..
    COMPOSE_COMMIT=a4f80d74159cbff2fe850f38fc1fddc92072b270
    git cat-file -e "${COMPOSE_COMMIT}^{commit}"
    COMPOSE_TMP=$(mktemp src/.docker-compose.yml.XXXXXX)
@@ -956,6 +984,27 @@ schema migration 之後，盲目回退舊 image tag 可能不安全。若升級�
    trap - EXIT
    cd src
    docker compose -f docker-compose.yml config --quiet
+   grep -F 'image: postgres:14.23-alpine' docker-compose.yml
+   grep -F '/n8n/db:/var/lib/postgresql/data' docker-compose.yml
+   grep -F 'image: n8nio/n8n:2.32.5' docker-compose.yml
+   docker compose -f docker-compose.yml up -d --no-deps n8n-db
+   DB_CONTAINER=$(docker compose -f docker-compose.yml ps -q n8n-db)
+   test -n "$DB_CONTAINER"
+   test "$(docker inspect --format '{{.Config.Image}}' "$DB_CONTAINER")" = postgres:14.23-alpine
+   test "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Source}}{{end}}{{end}}' "$DB_CONTAINER")" = /mnt/data/n8n/db
+   READY=0
+   for attempt in $(seq 1 60); do
+     if docker exec "$DB_CONTAINER" pg_isready -U n8n -d n8n >/dev/null; then
+       READY=1
+       break
+     fi
+     sleep 2
+   done
+   test "$READY" -eq 1 || { echo "PostgreSQL 14 did not become ready; stop."; exit 1; }
+   docker compose -f docker-compose.yml up -d --no-deps n8n
+   N8N_CONTAINER=$(docker compose -f docker-compose.yml ps -q n8n)
+   test "$(docker exec "$N8N_CONTAINER" n8n --version)" = 2.32.5
+   docker compose -f docker-compose.yml ps n8n n8n-db
    ```
 
 ### 監控
