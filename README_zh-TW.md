@@ -106,8 +106,9 @@ newgrp docker
    由於容器內的使用者 ID (UID) 可能與主機不同，請執行以下指令修正資料夾權限，以避免 `Permission denied` 錯誤：
 
    ```bash
-   # 修正 n8n 資料夾權限 (UID 1000)
-   sudo chown -R 1000:1000 /mnt/data/n8n
+   # 只有 n8n 應用資料屬於 UID 1000；PostgreSQL 18 的
+   # /mnt/data/n8n/pg 必須保持 UID 70，/mnt/data/n8n/db 是 PG14 回滾來源。
+   sudo chown -R 1000:1000 /mnt/data/n8n/data
 
    # 修正 CodiMD 資料夾權限 (UID 1500)
    sudo chown -R 1500:1500 /mnt/data/codimd
@@ -690,6 +691,13 @@ _如果本來就有足夠 headroom，可能還是比您的咖啡癮便宜。☕_
 schema migration 之後，盲目回退舊 image tag 可能不安全。若升級後失敗，請改用已驗證的升級前備份還原，不要假設前一版 image 一定能安全讀取新資料。
 
 #### n8n 與 PostgreSQL 主版本升級
+
+以下程序記錄從 n8n 2.32.5 升至 2.40.7、PostgreSQL 14 升至 18 的歷史遷移；
+其中 C1/C2 commit ID 不應再次用於部署現行版本。目前 n8n image 固定為
+`src/docker-compose.yml` 中的 `n8nio/n8n:2.41.3`。往後僅升級 n8n 時，
+先備份資料庫及 n8n home，再從 `src/` 拉取 image，且只以
+`docker compose up -d --no-deps n8n` 重建 n8n；確認版本與健康狀態後，
+才考慮清理回滾用的 image 或資料。
 
 只升級專用的 `n8n-db` 與 `n8n`；絕不可執行全專案的 `docker compose pull` 或 `up`，因為其他服務包含浮動 tag。CodiMD 使用獨立的 `codimd-db`，不得停止、升級或還原它。
 

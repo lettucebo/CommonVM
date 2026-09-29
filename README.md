@@ -108,8 +108,9 @@ newgrp docker
    Since container user IDs (UID) may differ from the host, run the following commands to fix folder permissions and avoid `Permission denied` errors:
 
    ```bash
-   # Fix n8n folder permissions (UID 1000)
-   sudo chown -R 1000:1000 /mnt/data/n8n
+   # Only n8n's application data is UID 1000; PostgreSQL 18's
+   # /mnt/data/n8n/pg must remain UID 70, and /mnt/data/n8n/db is the PG14 rollback copy.
+   sudo chown -R 1000:1000 /mnt/data/n8n/data
 
    # Fix CodiMD folder permissions (UID 1500)
    sudo chown -R 1500:1500 /mnt/data/codimd
@@ -694,6 +695,14 @@ For an Open WebUI upgrade:
 Schema migrations can make a blind image rollback unsafe. If an upgrade fails after a schema change, restore from the verified pre-upgrade backup instead of assuming the previous image tag can read the new data safely.
 
 #### n8n and PostgreSQL major-version upgrade
+
+The procedure below records the original migration from n8n 2.32.5 to 2.40.7
+and PostgreSQL 14 to 18; its C1/C2 commit IDs are historical and must not be
+reused to deploy the current release. The current n8n image is pinned to
+`n8nio/n8n:2.41.3` in `src/docker-compose.yml`. For subsequent n8n-only updates,
+back up the database and n8n home first, then pull and recreate **only** `n8n`
+with `docker compose up -d --no-deps n8n` from `src/`; verify its version and
+health before removing any rollback images or data.
 
 Upgrade only `n8n-db` and `n8n`; never run project-wide `docker compose pull` or `up`, because other services include floating tags. CodiMD uses its separate `codimd-db`; do not stop, upgrade, or restore it.
 

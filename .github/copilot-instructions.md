@@ -31,7 +31,9 @@ directory's path. Always confirm real names with `docker compose ps` before any
   `/var/lib/postgresql` to match its version-specific `PGDATA` layout.
 - **All persistent data lives under `${DATA_ROOT}` (default `/mnt/data`)** — the Azure data disk.
   Never store data on the temporary disk; it is wiped on reboot. Host folders need specific UIDs:
-  n8n = `1000:1000`, codimd = `1500:1500`.
+  n8n application data (`n8n/data`) = `1000:1000`, PostgreSQL 18 data
+  (`n8n/pg`) = `70:70`, codimd = `1500:1500`. Never recursively chown
+  `${DATA_ROOT}/n8n` or modify the preserved PG14 rollback directory (`n8n/db`).
 
 ## Conventions
 
