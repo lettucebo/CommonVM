@@ -1,6 +1,8 @@
 # Common Services
 
-This setup combines CodiMD, Outline, n8n, Open WebUI, and RustDesk onto a single VM using Docker Compose. Caddy acts as the reverse proxy for CodiMD, n8n, Outline, and Open WebUI.
+This setup combines CodiMD, HedgeDoc, Outline, n8n, Open WebUI, and RustDesk onto a single VM using Docker Compose. Caddy acts as the reverse proxy for CodiMD, HedgeDoc, n8n, Outline, and Open WebUI. HedgeDoc is an opt-in parallel migration target; CodiMD remains in service.
+
+> **HedgeDoc migration:** Follow [the bilingual migration runbook](docs/CODIMD_TO_HEDGEDOC_MIGRATION.md) before enabling its profile. Back up the databases and snapshot both VM disks before any changes; never point HedgeDoc at the CodiMD database.
 
 > **Note**: This project merges multiple deployments:
 > - [n8n-azure-vm-starter](https://github.com/lettucebo/n8n-azure-vm-starter) - n8n workflow automation
@@ -18,6 +20,7 @@ This setup combines CodiMD, Outline, n8n, Open WebUI, and RustDesk onto a single
 - Public IP address for the Caddy and RustDesk surfaces
 - DNS records pointing to the VM IP, one per Caddy-routed service (see `.env`):
   - CodiMD (`CODIMD_DOMAIN`)
+  - HedgeDoc staging (`HEDGEDOC_STAGING_DOMAIN`, only during migration)
   - n8n (`N8N_DOMAIN`)
   - Outline (`OUTLINE_DOMAIN`)
   - Open WebUI (`OPENWEBUI_DOMAIN`)
@@ -103,6 +106,12 @@ newgrp docker
      capacity.
    - Configure every `OPENWEBUI_*` placeholder (including
      `OPENWEBUI_ALLOWED_IPS`) before the first Open WebUI boot.
+   - Before publishing HedgeDoc staging, set
+     `HEDGEDOC_STAGING_DOMAIN` and `HEDGEDOC_STAGING_ALLOWED_IPS` to the
+     testers' current IPs/CIDRs in `.env`. An empty allowlist denies access.
+     If the domain is missing, Caddy uses a local-only fallback rather than
+     breaking the shared proxy. Do not start HedgeDoc until its separate
+     database copy has been restored and preflight-checked.
    - **Important**: Update `DATA_ROOT` in `.env` to point to your mounted disk path (default: `/mnt/data`).
 4. **Fix Folder Permissions**:
    Since container user IDs (UID) may differ from the host, run the following commands to fix folder permissions and avoid `Permission denied` errors:
@@ -114,6 +123,10 @@ newgrp docker
 
    # Fix CodiMD folder permissions (UID 1500)
    sudo chown -R 1500:1500 /mnt/data/codimd
+
+   # HedgeDoc uploads (UID 10000); do not change CodiMD ownership.
+   sudo mkdir -p /mnt/data/hedgedoc/uploads
+   sudo chown -R 10000:10000 /mnt/data/hedgedoc/uploads
 
    # Fix Outline folder permissions (UID 1001, the image's "nodejs" user)
    sudo mkdir -p /mnt/data/outline/data /mnt/data/outline/db /mnt/data/outline/redis
@@ -1038,7 +1051,7 @@ htop
 
 ### Backups
 
-Back up all three PostgreSQL databases, Outline's local attachments, and Open WebUI's local data. These commands create timestamped files and do not overwrite prior backups.
+Back up all three existing PostgreSQL databases, Outline's local attachments, and Open WebUI's local data. For the separate HedgeDoc database and uploads, use [the migration runbook](docs/CODIMD_TO_HEDGEDOC_MIGRATION.md) before cutover and on every later backup; do not treat the original CodiMD dump as a backup of edits made in HedgeDoc. These commands create timestamped files and do not overwrite prior backups.
 
 ```bash
 # Run from the Compose project directory so docker compose can find docker-compose.yml.
@@ -1052,6 +1065,27 @@ docker exec src-n8n-db-1 pg_dump -U n8n -d n8n -Fc --no-owner --no-privileges \
   > "/mnt/data/backup/${STAMP}/n8n.dump"
 docker exec src-outline-db-1 pg_dump -U outline -d outline -Fc --no-owner --no-privileges \
   > "/mnt/data/backup/${STAMP}/outline.dump"
+# Back up the database selected by HedgeDoc, not PostgreSQL's initial DB.
+if docker compose ps --status running --services | grep -qx hedgedoc-db; then
+  HEDGEDOC_ACTIVE_DB=$(sed -n 's/^HEDGEDOC_DB_NAME=//p' .env)
+  case "$HEDGEDOC_ACTIVE_DB" in
+    ''|*[!A-Za-z0-9_]*) echo "Invalid HEDGEDOC_DB_NAME" >&2; exit 1 ;;
+  esac
+  if docker compose ps --status running --services | grep -qx hedgedoc; then
+    docker compose exec -T hedgedoc sh -ec \
+      'case "$CMD_DB_URL" in */"$1") ;; *) echo "HedgeDoc app DB mismatch" >&2; exit 1 ;; esac' \
+      _ "$HEDGEDOC_ACTIVE_DB" || exit 1
+  fi
+  docker compose exec -T hedgedoc-db sh -ec \
+    'pg_dump -U "$POSTGRES_USER" -d "$1" -Fc --no-owner --no-privileges' \
+    _ "$HEDGEDOC_ACTIVE_DB" \
+    > "/mnt/data/backup/${STAMP}/hedgedoc.dump" || exit 1
+  sudo tar czf "/mnt/data/backup/${STAMP}/hedgedoc-uploads.tar.gz" \
+    -C /mnt/data/hedgedoc uploads || exit 1
+  docker compose exec -T hedgedoc-db pg_restore --list \
+    < "/mnt/data/backup/${STAMP}/hedgedoc.dump" > /dev/null || exit 1
+  tar tzf "/mnt/data/backup/${STAMP}/hedgedoc-uploads.tar.gz" > /dev/null || exit 1
+fi
 
 # Some private attachments are mode 0600 and owned by Outline's UID 1001.
 sudo tar czf "/mnt/data/backup/${STAMP}/outline-data.tar.gz" \
