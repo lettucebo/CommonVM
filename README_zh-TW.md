@@ -1059,16 +1059,26 @@ docker exec src-n8n-db-1 pg_dump -U n8n -d n8n -Fc --no-owner --no-privileges \
   > "/mnt/data/backup/${STAMP}/n8n.dump"
 docker exec src-outline-db-1 pg_dump -U outline -d outline -Fc --no-owner --no-privileges \
   > "/mnt/data/backup/${STAMP}/outline.dump"
-# hedgedoc-db 運作後備份其目前的資料庫與 uploads。
+# 備份 HedgeDoc 實際使用的資料庫，而不是 PostgreSQL 的初始資料庫。
 if docker compose ps --status running --services | grep -qx hedgedoc-db; then
+  HEDGEDOC_ACTIVE_DB=$(sed -n 's/^HEDGEDOC_DB_NAME=//p' .env)
+  case "$HEDGEDOC_ACTIVE_DB" in
+    ''|*[!A-Za-z0-9_]*) echo "Invalid HEDGEDOC_DB_NAME" >&2; exit 1 ;;
+  esac
+  if docker compose ps --status running --services | grep -qx hedgedoc; then
+    docker compose exec -T hedgedoc sh -ec \
+      'case "$CMD_DB_URL" in */"$1") ;; *) echo "HedgeDoc app DB mismatch" >&2; exit 1 ;; esac' \
+      _ "$HEDGEDOC_ACTIVE_DB" || exit 1
+  fi
   docker compose exec -T hedgedoc-db sh -ec \
-    'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc --no-owner --no-privileges' \
-    > "/mnt/data/backup/${STAMP}/hedgedoc.dump"
+    'pg_dump -U "$POSTGRES_USER" -d "$1" -Fc --no-owner --no-privileges' \
+    _ "$HEDGEDOC_ACTIVE_DB" \
+    > "/mnt/data/backup/${STAMP}/hedgedoc.dump" || exit 1
   sudo tar czf "/mnt/data/backup/${STAMP}/hedgedoc-uploads.tar.gz" \
-    -C /mnt/data/hedgedoc uploads
+    -C /mnt/data/hedgedoc uploads || exit 1
   docker compose exec -T hedgedoc-db pg_restore --list \
-    < "/mnt/data/backup/${STAMP}/hedgedoc.dump" > /dev/null
-  tar tzf "/mnt/data/backup/${STAMP}/hedgedoc-uploads.tar.gz" > /dev/null
+    < "/mnt/data/backup/${STAMP}/hedgedoc.dump" > /dev/null || exit 1
+  tar tzf "/mnt/data/backup/${STAMP}/hedgedoc-uploads.tar.gz" > /dev/null || exit 1
 fi
 
 # 部分私密附件為 mode 0600，且由 Outline UID 1001 擁有。

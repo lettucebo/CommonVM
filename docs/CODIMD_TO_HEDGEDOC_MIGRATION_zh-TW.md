@@ -69,10 +69,16 @@ OS disk 與**每一顆** data disk 都要有成功的 snapshot；未取得核准
 
 ## 2. 只還原到新資料庫
 
+下列初次還原只適用**空資料庫**。若既有 staging 副本已存在，
+不得還原到舊 DB；改用本節後面的 `hedgedoc_clean` 獨立修復流程。
+
 在 `src/.env` 新增 `HEDGEDOC_STAGING_DOMAIN=hedgedoc.yu.money`、
 `HEDGEDOC_STAGING_ALLOWED_IPS=<測試者 IP/CIDR>`、
 `HEDGEDOC_DOMAIN=hedgedoc.yu.money`、`CODIMD_UPSTREAM=codimd:3000`、
-`HEDGEDOC_DB_*` 及新的 `HEDGEDOC_SESSION_SECRET`。Entra username
+`HEDGEDOC_DB_*` 及新的 `HEDGEDOC_SESSION_SECRET`。切換 app 所用
+資料庫時，`HEDGEDOC_DB_INIT_NAME=hedgedoc` 不變；PostgreSQL 初始
+資料庫不一定是 HedgeDoc 實際使用的資料庫，備份必須依
+`HEDGEDOC_DB_NAME`。Entra username
 欄位與 Azure Blob 設定沿用 CodiMD。首次重建 Caddy 前確認
 staging 網域及 allowlist 正確：未設定網域會使用
 `hedgedoc.localhost`，空白 allowlist 則拒絕所有 staging 請求。
@@ -84,14 +90,22 @@ staging 網域及 allowlist 正確：未設定網域會使用
 ```sh
 cd /path/to/CommonVM/src
 docker compose config --quiet
-sudo mkdir -p /mnt/data/hedgedoc/db /mnt/data/hedgedoc/uploads
+sudo mkdir -p /mnt/data/hedgedoc/db /mnt/data/hedgedoc/uploads /mnt/data/hedgedoc/empty-docs
 sudo chown 70:70 /mnt/data/hedgedoc/db
 sudo chown -R 10000:10000 /mnt/data/hedgedoc/uploads
+test -z "$(find /mnt/data/hedgedoc/empty-docs -mindepth 1 -print -quit)" || {
+  echo "HedgeDoc empty-docs directory is not empty" >&2; exit 1;
+}
+HD_DB=$(sed -n 's/^HEDGEDOC_DB_NAME=//p' .env)
+case "$HD_DB" in ''|*[!A-Za-z0-9_]*) echo "Invalid HEDGEDOC_DB_NAME" >&2; exit 1 ;; esac
 docker compose up -d hedgedoc-db
 docker compose ps
 # 等待 healthy；實際名稱以 docker compose ps 為準。
-docker exec -i src-hedgedoc-db-1 pg_restore -U hedgedoc -d hedgedoc \
-  --no-owner --no-privileges --exit-on-error < "$B/codimd.dump"
+tables=$(docker compose exec -T hedgedoc-db psql -qX -tA -v ON_ERROR_STOP=1 \
+  -U hedgedoc -d "$HD_DB" -c "SELECT count(*) FROM pg_tables WHERE schemaname='public'") || exit 1
+test "$tables" = 0 || { echo "Refusing to restore over an existing database" >&2; exit 1; }
+docker exec -i src-hedgedoc-db-1 pg_restore -U hedgedoc -d "$HD_DB" \
+  --no-owner --no-privileges --exit-on-error --single-transaction < "$B/codimd.dump" || exit 1
 sudo cp -a /mnt/data/codimd/uploads/. /mnt/data/hedgedoc/uploads/
 sudo chown -R 10000:10000 /mnt/data/hedgedoc/uploads
 ```
@@ -103,9 +117,9 @@ sudo chown -R 10000:10000 /mnt/data/hedgedoc/uploads
 方式，不得修改 CodiMD 正式資料庫。
 
 ```sh
-docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d hedgedoc < "$S/preflight-orphans.sql"
-docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d hedgedoc < "$S/preflight-pending-revisions.sql" > "$B/pending-revisions.txt"
-docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d hedgedoc < "$S/note-fingerprint.sql" > "$B/before.fingerprint"
+docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d "$HD_DB" < "$S/preflight-orphans.sql"
+docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d "$HD_DB" < "$S/preflight-pending-revisions.sql" > "$B/pending-revisions.txt"
+docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d "$HD_DB" < "$S/note-fingerprint.sql" > "$B/before.fingerprint"
 docker exec -i src-codimd-db-1 psql -qX -v ON_ERROR_STOP=1 -U codimd -d codimd < "$S/note-fingerprint.sql" > "$B/live.fingerprint"
 ```
 
@@ -113,6 +127,30 @@ docker exec -i src-codimd-db-1 psql -qX -v ON_ERROR_STOP=1 -U codimd -d codimd <
 出現差異，並列出 ID。比較兩邊 uploads 的檔案數與大小；唯讀查詢
 `SELECT name FROM "SequelizeMeta" ORDER BY name`、
 `SELECT to_regclass('"Temp"')`，記錄 migration 狀態。
+HedgeDoc 1.12.0 的 alias GET 可能以較新的內建
+`public/docs/<alias>.md` 覆寫資料庫筆記，因此唯讀的空 docs mount
+不可在切換資料庫時移除。若先前副本已被覆寫，應保存原副本與其
+dump，從原始 CodiMD dump **另建新資料庫**，不可刪除或覆寫舊副本。
+針對這次已覆寫的 staging：只停止 `hedgedoc` app，確認
+`hedgedoc-drift.dump` 已驗證後，在 `src/` 執行下列指令，`B`
+指向原始已驗證備份；既有 `hedgedoc` 資料庫不動：
+
+```sh
+test -s "$B/codimd.dump" && test -s "$B/hedgedoc-drift.dump" || exit 1
+docker compose ps hedgedoc hedgedoc-db codimd codimd-db
+exists=$(docker compose exec -T hedgedoc-db psql -qX -tA -v ON_ERROR_STOP=1 \
+  -U hedgedoc -d postgres -c "SELECT 1 FROM pg_database WHERE datname='hedgedoc_clean'") || exit 1
+test -z "$exists" || { echo "hedgedoc_clean already exists" >&2; exit 1; }
+docker compose exec -T hedgedoc-db createdb -U hedgedoc hedgedoc_clean || exit 1
+docker compose exec -T hedgedoc-db pg_restore -U hedgedoc -d hedgedoc_clean \
+  --no-owner --no-privileges --exit-on-error --single-transaction < "$B/codimd.dump" || exit 1
+# 新副本通過上述 preflight 和 fingerprint 檢查後，才切換 app。
+HD_DB=hedgedoc_clean
+```
+
+檢查通過後，`.env` 只改 `HEDGEDOC_DB_NAME=hedgedoc_clean`；
+`HEDGEDOC_DB_INIT_NAME=hedgedoc` 保持不變。舊副本及其 dump
+保留供稽核；第 3 節只啟 app，不重建 DB service。
 
 ## 3. 啟動 staging
 
@@ -123,20 +161,34 @@ redirect URI（Outline 也使用此 app）。拜訪任何副本筆記前，從�
 測試者 IP 與**不在清單內**的 IP 分別驗證 staging allowlist。
 
 ```sh
-docker compose --profile hedgedoc up -d hedgedoc
+HD_DB=$(sed -n 's/^HEDGEDOC_DB_NAME=//p' .env)
+case "$HD_DB" in ''|*[!A-Za-z0-9_]*) echo "Invalid HEDGEDOC_DB_NAME" >&2; exit 1 ;; esac
+docker compose --profile hedgedoc up -d --no-deps hedgedoc
 docker compose ps
 docker compose logs --tail=200 hedgedoc
 # Caddy 的 environment 改了；須先核准 recreate。
 docker compose up -d caddy
 docker compose logs --tail=100 caddy
-docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d hedgedoc < "$S/note-fingerprint.sql" > "$B/after.fingerprint"
+docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d "$HD_DB" < "$S/note-fingerprint.sql" > "$B/after.fingerprint"
 free -h; docker stats --no-stream
 ```
 
 任何 migration error 都應停止。既有 Notes/Users/Authors/Revisions
-必須與啟動前副本指紋相同；僅容許 `pending-revisions.txt` 中的筆記
-新增 Revisions。其他任何異動都須調查。確認 CodiMD、n8n、Outline、
+必須與啟動前副本指紋相同，但 pending revision save 可對
+`pending-revisions.txt` 中的筆記新增 Revisions 並清空其前一筆
+revision 的 `content`；**既有 Notes.content 不得改動**。
+其他任何異動都須調查。確認 CodiMD、n8n、Outline、
 Open WebUI 仍可正常存取。
+啟動健康後先保存 post-start 指紋；對與 image `public/docs` 同名
+的所有 alias 做 GET 後，再保存 post-GET 指紋，兩者須逐位元相同。
+只在啟動尚未完成前取第一次指紋，無法證明 GET 不會覆寫筆記。
+對受保護備份中的 `changed-aliases.txt` 所列 4 個 alias 從
+`src_web` 內網逐條 GET，然後執行：
+
+```sh
+docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d "${HD_DB:?Set HD_DB from .env}" < "$S/note-fingerprint.sql" > "$B/post-get.fingerprint"
+diff -u "$B/after.fingerprint" "$B/post-get.fingerprint" || exit 1
+```
 
 ## 4. 全量比對既有短網址與筆記連結
 
@@ -154,7 +206,9 @@ npx wrangler d1 execute akamoney-clicks --remote --json --command `
 alias、published、slide、action 與 revision path：
 
 ```sh
-docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d hedgedoc < "$S/build-link-inventory.sql" > "$B/db-paths.txt"
+HD_DB=$(sed -n 's/^HEDGEDOC_DB_NAME=//p' .env)
+case "$HD_DB" in ''|*[!A-Za-z0-9_]*) echo "Invalid HEDGEDOC_DB_NAME" >&2; exit 1 ;; esac
+docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d "$HD_DB" < "$S/build-link-inventory.sql" > "$B/db-paths.txt"
 # 將 db-paths.txt 與 AkaMoney 的原始 paths 合併至 paths.txt；
 # 保留 query string；確認 AkaMoney 筆數與 SELECT 結果相同。
 sort -u "$B/db-paths.txt" "$B/aka-paths.txt" > "$B/paths.txt"
@@ -194,7 +248,7 @@ Users 筆數（不可新增重複帳號）。markmap 與部分 CodiMD fence 的
    覆蓋或刪除 staging DB。
 3. `.env` 改 `HEDGEDOC_DB_NAME=hedgedoc_prod`、
    `HEDGEDOC_DOMAIN=<CODIMD_DOMAIN>`，然後
-   `docker compose --profile hedgedoc up -d hedgedoc`。完整重跑
+   `docker compose --profile hedgedoc up -d --no-deps hedgedoc`。完整重跑
    fingerprint 與連結比對（`B_HOST=<CODIMD_DOMAIN>`），不能有
    非預期差異。保存 `cutover-baseline.fingerprint`。
 4. **開放流量前**記錄 `CUTOVER_AT`。設定

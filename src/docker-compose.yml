@@ -83,7 +83,7 @@ services:
     environment:
       - POSTGRES_USER=${HEDGEDOC_DB_USER}
       - POSTGRES_PASSWORD=${HEDGEDOC_DB_PASSWORD}
-      - POSTGRES_DB=${HEDGEDOC_DB_NAME}
+      - POSTGRES_DB=${HEDGEDOC_DB_INIT_NAME:-hedgedoc}
     volumes:
       - ${DATA_ROOT}/hedgedoc/db:/var/lib/postgresql
     mem_limit: 256m
@@ -130,6 +130,7 @@ services:
       - CMD_AZURE_CONTAINER=${CODIMD_AZURE_CONTAINER}
     volumes:
       - ${DATA_ROOT}/hedgedoc/uploads:/hedgedoc/public/uploads
+      - ${DATA_ROOT}/hedgedoc/empty-docs:/hedgedoc/public/docs:ro
     mem_limit: 512m
     depends_on:
       hedgedoc-db:

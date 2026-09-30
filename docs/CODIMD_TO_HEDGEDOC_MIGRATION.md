@@ -72,10 +72,17 @@ their IDs with the dump manifest. Do not delete them automatically.
 
 ## 2. Restore only to the new database
 
+The initial restore below is only for an empty database. If a previous
+staging copy already exists, do **not** restore into it; follow the separate
+`hedgedoc_clean` recovery procedure later in this section instead.
+
 Update `src/.env` with `HEDGEDOC_STAGING_DOMAIN=hedgedoc.yu.money`,
 `HEDGEDOC_STAGING_ALLOWED_IPS=<tester IP/CIDRs>`,
 `HEDGEDOC_DOMAIN=hedgedoc.yu.money`, `CODIMD_UPSTREAM=codimd:3000`,
-`HEDGEDOC_DB_*` and a fresh `HEDGEDOC_SESSION_SECRET`. Keep the Entra profile
+`HEDGEDOC_DB_*` and a fresh `HEDGEDOC_SESSION_SECRET`. Keep
+`HEDGEDOC_DB_INIT_NAME=hedgedoc` when switching the application to another
+restored database: PostgreSQL's initialization database is not necessarily
+the one HedgeDoc uses. Backups must target `HEDGEDOC_DB_NAME`. Keep the Entra profile
 username attribute and Azure Blob settings identical to CodiMD. Before the
 first Caddy recreation, ensure the staging domain and the IP allowlist
 are correct: an unset hostname falls back to `hedgedoc.localhost`, and an
@@ -88,14 +95,22 @@ Do not set
 ```sh
 cd /path/to/CommonVM/src
 docker compose config --quiet
-sudo mkdir -p /mnt/data/hedgedoc/db /mnt/data/hedgedoc/uploads
+sudo mkdir -p /mnt/data/hedgedoc/db /mnt/data/hedgedoc/uploads /mnt/data/hedgedoc/empty-docs
 sudo chown 70:70 /mnt/data/hedgedoc/db
 sudo chown -R 10000:10000 /mnt/data/hedgedoc/uploads
+test -z "$(find /mnt/data/hedgedoc/empty-docs -mindepth 1 -print -quit)" || {
+  echo "HedgeDoc empty-docs directory is not empty" >&2; exit 1;
+}
+HD_DB=$(sed -n 's/^HEDGEDOC_DB_NAME=//p' .env)
+case "$HD_DB" in ''|*[!A-Za-z0-9_]*) echo "Invalid HEDGEDOC_DB_NAME" >&2; exit 1 ;; esac
 docker compose up -d hedgedoc-db
 docker compose ps
 # Wait for healthy; use the actual name printed by docker compose ps.
-docker exec -i src-hedgedoc-db-1 pg_restore -U hedgedoc -d hedgedoc \
-  --no-owner --no-privileges --exit-on-error < "$B/codimd.dump"
+tables=$(docker compose exec -T hedgedoc-db psql -qX -tA -v ON_ERROR_STOP=1 \
+  -U hedgedoc -d "$HD_DB" -c "SELECT count(*) FROM pg_tables WHERE schemaname='public'") || exit 1
+test "$tables" = 0 || { echo "Refusing to restore over an existing database" >&2; exit 1; }
+docker exec -i src-hedgedoc-db-1 pg_restore -U hedgedoc -d "$HD_DB" \
+  --no-owner --no-privileges --exit-on-error --single-transaction < "$B/codimd.dump" || exit 1
 sudo cp -a /mnt/data/codimd/uploads/. /mnt/data/hedgedoc/uploads/
 sudo chown -R 10000:10000 /mnt/data/hedgedoc/uploads
 ```
@@ -107,9 +122,9 @@ revisions. A nonzero count is a **stop**; report the affected IDs and decide
 how to preserve them before proceeding, without modifying CodiMD.
 
 ```sh
-docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d hedgedoc < "$S/preflight-orphans.sql"
-docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d hedgedoc < "$S/preflight-pending-revisions.sql" > "$B/pending-revisions.txt"
-docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d hedgedoc < "$S/note-fingerprint.sql" > "$B/before.fingerprint"
+docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d "$HD_DB" < "$S/preflight-orphans.sql"
+docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d "$HD_DB" < "$S/preflight-pending-revisions.sql" > "$B/pending-revisions.txt"
+docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d "$HD_DB" < "$S/note-fingerprint.sql" > "$B/before.fingerprint"
 docker exec -i src-codimd-db-1 psql -qX -v ON_ERROR_STOP=1 -U codimd -d codimd < "$S/note-fingerprint.sql" > "$B/live.fingerprint"
 ```
 
@@ -117,6 +132,33 @@ Compare live vs copy (`diff -u`): only notes changed **since the dump** can
 differ; inventory them. Check upload count and sizes in both directories.
 Read-only `SELECT name FROM "SequelizeMeta" ORDER BY name` and
 `SELECT to_regclass('"Temp"')` on the copy document the migration state.
+HedgeDoc 1.12.0 can overwrite DB notes on an alias GET if a newer bundled
+`public/docs/<alias>.md` exists. The empty, read-only docs mount is required:
+do not remove it when switching databases. If an older staging copy was
+already overwritten, preserve it and its dump; restore the original CodiMD
+dump into a **new** database instead of deleting or repairing the old copy.
+For the affected staging instance, after stopping only `hedgedoc` and
+verifying `hedgedoc-drift.dump`, run the following from `src/` with `B`
+pointing to the original verified backup. The original `hedgedoc` database
+remains untouched:
+
+```sh
+test -s "$B/codimd.dump" && test -s "$B/hedgedoc-drift.dump" || exit 1
+docker compose ps hedgedoc hedgedoc-db codimd codimd-db
+exists=$(docker compose exec -T hedgedoc-db psql -qX -tA -v ON_ERROR_STOP=1 \
+  -U hedgedoc -d postgres -c "SELECT 1 FROM pg_database WHERE datname='hedgedoc_clean'") || exit 1
+test -z "$exists" || { echo "hedgedoc_clean already exists" >&2; exit 1; }
+docker compose exec -T hedgedoc-db createdb -U hedgedoc hedgedoc_clean || exit 1
+docker compose exec -T hedgedoc-db pg_restore -U hedgedoc -d hedgedoc_clean \
+  --no-owner --no-privileges --exit-on-error --single-transaction < "$B/codimd.dump" || exit 1
+# Only switch the app after the new copy passes the preflight and fingerprint checks above.
+HD_DB=hedgedoc_clean
+```
+
+After the checks pass, change only `HEDGEDOC_DB_NAME=hedgedoc_clean` in
+`.env`; leave `HEDGEDOC_DB_INIT_NAME=hedgedoc`. The earlier restored database
+and its verified dump remain available for audit. The app-only start in
+section 3 must not recreate the database service.
 
 ## 3. Bring up staging
 
@@ -127,19 +169,35 @@ the staging allowlist permits **only** tester IPs, including a negative test
 from outside the list, before visiting any copied note.
 
 ```sh
-docker compose --profile hedgedoc up -d hedgedoc
+HD_DB=$(sed -n 's/^HEDGEDOC_DB_NAME=//p' .env)
+case "$HD_DB" in ''|*[!A-Za-z0-9_]*) echo "Invalid HEDGEDOC_DB_NAME" >&2; exit 1 ;; esac
+docker compose --profile hedgedoc up -d --no-deps hedgedoc
 docker compose ps
 docker compose logs --tail=200 hedgedoc
 # The Caddy environment changed; approve this recreation first.
 docker compose up -d caddy
 docker compose logs --tail=100 caddy
-docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d hedgedoc < "$S/note-fingerprint.sql" > "$B/after.fingerprint"
+docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d "$HD_DB" < "$S/note-fingerprint.sql" > "$B/after.fingerprint"
 free -h; docker stats --no-stream
 ```
 
 Stop if migration errors occur. Existing Notes/Users/Authors/Revisions must
-match the pre-start copy fingerprint. HedgeDoc may create **new** Revisions
-only for note IDs in `pending-revisions.txt`; investigate all other changes.
+match the pre-start copy fingerprint except for pending revision saves:
+HedgeDoc may create **new** Revisions and clear the prior revision's
+`content` only for note IDs in `pending-revisions.txt`; no existing
+`Notes.content` may change. Investigate all other changes.
+After startup is healthy, save a post-start fingerprint. GET every alias
+whose name exists in the image's `public/docs` directory, then save a
+post-GET fingerprint: they must match byte-for-byte. A first fingerprint
+taken before startup fully completes cannot certify that alias GETs are safe.
+For the four affected aliases listed in the protected backup's
+`changed-aliases.txt`, access each on the internal `src_web` network, then
+run the following:
+
+```sh
+docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d "${HD_DB:?Set HD_DB from .env}" < "$S/note-fingerprint.sql" > "$B/post-get.fingerprint"
+diff -u "$B/after.fingerprint" "$B/post-get.fingerprint" || exit 1
+```
 Confirm CodiMD, n8n, Outline and Open WebUI still work.
 
 ## 4. Check every existing short URL and note URL
@@ -159,7 +217,9 @@ into Git. From the copy, generate all note ID / alias / published / slide /
 action / revision paths:
 
 ```sh
-docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d hedgedoc < "$S/build-link-inventory.sql" > "$B/db-paths.txt"
+HD_DB=$(sed -n 's/^HEDGEDOC_DB_NAME=//p' .env)
+case "$HD_DB" in ''|*[!A-Za-z0-9_]*) echo "Invalid HEDGEDOC_DB_NAME" >&2; exit 1 ;; esac
+docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d "$HD_DB" < "$S/build-link-inventory.sql" > "$B/db-paths.txt"
 # Merge db-paths.txt with the exact AkaMoney paths into paths.txt;
 # deduplicate without losing query strings. Ensure the AkaMoney count matches
 # the SELECT result count before accepting the list.
@@ -202,7 +262,7 @@ unchanged. A new HedgeDoc session secret means users must log in again.
    HedgeDoc upload folder. Do not overwrite or delete the staging database.
 3. Set `HEDGEDOC_DB_NAME=hedgedoc_prod` and
    `HEDGEDOC_DOMAIN=<CODIMD_DOMAIN>` in `.env`, then
-   `docker compose --profile hedgedoc up -d hedgedoc`. Rerun the full
+   `docker compose --profile hedgedoc up -d --no-deps hedgedoc`. Rerun the full
    fingerprint and link comparison (set `B_HOST=<CODIMD_DOMAIN>`); no
    unexpected differences allowed. Save a `cutover-baseline.fingerprint`.
 4. Record `CUTOVER_AT` **before opening traffic**. Set
