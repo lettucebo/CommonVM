@@ -117,8 +117,9 @@ newgrp docker
    Since container user IDs (UID) may differ from the host, run the following commands to fix folder permissions and avoid `Permission denied` errors:
 
    ```bash
-   # Fix n8n folder permissions (UID 1000)
-   sudo chown -R 1000:1000 /mnt/data/n8n
+   # Only n8n's application data is UID 1000; PostgreSQL 18's
+   # /mnt/data/n8n/pg must remain UID 70, and /mnt/data/n8n/db is the PG14 rollback copy.
+   sudo chown -R 1000:1000 /mnt/data/n8n/data
 
    # Fix CodiMD folder permissions (UID 1500)
    sudo chown -R 1500:1500 /mnt/data/codimd
@@ -705,6 +706,331 @@ For an Open WebUI upgrade:
    ```
 
 Schema migrations can make a blind image rollback unsafe. If an upgrade fails after a schema change, restore from the verified pre-upgrade backup instead of assuming the previous image tag can read the new data safely.
+
+#### n8n and PostgreSQL major-version upgrade
+
+The procedure below records the original migration from n8n 2.32.5 to 2.40.7
+and PostgreSQL 14 to 18; its C1/C2 commit IDs are historical and must not be
+reused to deploy the current release. The current n8n image is pinned to
+`n8nio/n8n:2.41.3` in `src/docker-compose.yml`. For subsequent n8n-only updates,
+back up the database and n8n home first, then pull and recreate **only** `n8n`
+with `docker compose up -d --no-deps n8n` from `src/`; verify its version and
+health before removing any rollback images or data.
+
+Upgrade only `n8n-db` and `n8n`; never run project-wide `docker compose pull` or `up`, because other services include floating tags. CodiMD uses its separate `codimd-db`; do not stop, upgrade, or restore it.
+
+1. **Confirm scope and names.** Run from `src/`, where the Compose project name is pinned to `src`:
+
+   ```bash
+   docker compose -f docker-compose.yml config --services
+   docker compose -f docker-compose.yml ps --all
+   grep -n 'n8n-db' docker-compose.yml
+   ```
+
+   Confirm that only the `n8n` service refers to `n8n-db`, and record the actual container names shown by `ps` (normally `src-n8n-1` and `src-n8n-db-1`). Use the names shown by Compose for every later `docker exec` or restore. Generate one unique, non-secret `STAMP` on the authenticated workstation and use that exact value for both the VM backup directory and workstation snapshot names. Do not assume `$HOME` exists in Azure Run Command; if a user's home must be derived, use the existing `stat`/`getent` convention.
+
+   ```bash
+   STAMP=$(date -u +%Y%m%d-%H%M%S)
+   printf 'Use this non-secret STAMP for the VM backup and workstation snapshots: %s\n' "$STAMP"
+   ```
+
+2. **Stop n8n and make a restrictive, verified backup before migration.** Stop only n8n, then run the following on the VM from the Compose directory. Substitute the same `STAMP` generated above; never print `.env` or secret values.
+
+   ```bash
+   set -euo pipefail
+   set -o noclobber
+   cd /path/to/CommonVM/src
+   umask 077
+   STAMP="REPLACE_WITH_STAMP"
+   BACKUP="/mnt/data/backup/n8n-upgrade-${STAMP}"
+   DB_CONTAINER="src-n8n-db-1" # Replace with the name confirmed by docker compose ps.
+   test -d /mnt/data/backup || install -d -m 700 /mnt/data/backup
+   mkdir -m 700 -- "$BACKUP"
+   docker compose -f docker-compose.yml stop n8n
+
+   docker exec "$DB_CONTAINER" pg_dump -U n8n -d n8n -Fc \
+     > "$BACKUP/n8n.dump"
+   docker exec "$DB_CONTAINER" pg_dump -U n8n -d n8n -Fp \
+     > "$BACKUP/n8n.sql"
+   docker exec "$DB_CONTAINER" pg_dumpall -U n8n --globals-only \
+     > "$BACKUP/n8n-globals.sql"
+   sudo tar czf "$BACKUP/n8n-data.tar.gz" -C /mnt/data/n8n data
+   sudo chown "$(id -u):$(id -g)" "$BACKUP/n8n-data.tar.gz"
+   install -m 600 docker-compose.yml "$BACKUP/docker-compose.yml"
+   install -m 600 .env "$BACKUP/.env"
+   chmod 600 "$BACKUP"/*
+
+   sha256sum "$BACKUP/n8n.dump" "$BACKUP/n8n.sql" \
+     "$BACKUP/n8n-globals.sql" "$BACKUP/n8n-data.tar.gz" \
+     "$BACKUP/docker-compose.yml" "$BACKUP/.env" > "$BACKUP/SHA256SUMS"
+   chmod 600 "$BACKUP/SHA256SUMS"
+   sha256sum -c "$BACKUP/SHA256SUMS"
+   test -s "$BACKUP/n8n.sql"
+   tar tzf "$BACKUP/n8n-data.tar.gz" > /dev/null
+   docker exec -i "$DB_CONTAINER" pg_restore --list \
+     < "$BACKUP/n8n.dump" > /dev/null
+   ```
+
+   Restore-test the custom dump in a **new, isolated PostgreSQL 18.6 container** before touching the live database. Keep its directory, container, and downloaded image for investigation; never reuse an existing restore-check path or delete the image. Generate a temporary password without printing it. Mount the test data at PostgreSQL 18's `/var/lib/postgresql` volume root. Stream the dump from the host over stdin: the backup directory is mode 0700 and cannot be read by the container's `postgres` user.
+
+   ```bash
+   set -euo pipefail
+   set -o noclobber
+   STAMP="REPLACE_WITH_STAMP"
+   BACKUP="/mnt/data/backup/n8n-upgrade-${STAMP}"
+   CHECK_DIR="/mnt/data/restore-check/${STAMP}/n8n-pg18"
+   CHECK_CONTAINER="n8n-pg18-restore-check-${STAMP}"
+   DB_CONTAINER="src-n8n-db-1" # Replace with the name confirmed by docker compose ps.
+   test ! -e "$CHECK_DIR" || { echo "Restore-check path already exists; stop."; exit 1; }
+   install -d -m 700 "$CHECK_DIR"
+   sudo install -d -m 700 -o 70 -g 70 "$CHECK_DIR/pg"
+   export POSTGRES_PASSWORD
+   POSTGRES_PASSWORD=$(openssl rand -hex 32)
+   docker run -d --name "$CHECK_CONTAINER" --network none \
+     -e POSTGRES_USER=n8n -e POSTGRES_PASSWORD -e POSTGRES_DB=n8n \
+     -v "$CHECK_DIR/pg:/var/lib/postgresql" postgres:18.6-alpine
+   for attempt in $(seq 1 60); do
+     if docker exec "$CHECK_CONTAINER" pg_isready -h 127.0.0.1 -U n8n -d n8n; then
+       break
+     fi
+     sleep 2
+   done
+   docker exec "$CHECK_CONTAINER" pg_isready -h 127.0.0.1 -U n8n -d n8n
+   docker exec -i "$CHECK_CONTAINER" pg_restore -U n8n -d n8n \
+     --no-owner --no-privileges --exit-on-error < "$BACKUP/n8n.dump"
+   ```
+
+   Record **exact** user-table row counts on the source and restored database, then compare the files. Both count files are written under directories owned by the operator; only the `pg` child is owned by UID/GID `70:70`. The globals dump is retained separately; the isolated container already creates the `n8n` role from its environment.
+
+   ```bash
+   set -euo pipefail
+   set -o noclobber
+   STAMP="REPLACE_WITH_STAMP"
+   BACKUP="/mnt/data/backup/n8n-upgrade-${STAMP}"
+   CHECK_DIR="/mnt/data/restore-check/${STAMP}/n8n-pg18"
+   CHECK_CONTAINER="n8n-pg18-restore-check-${STAMP}"
+   DB_CONTAINER="src-n8n-db-1" # Replace with the name confirmed by docker compose ps.
+   count_rows() {
+     container=$1
+     docker exec "$container" psql -U n8n -d n8n -Atc \
+       "SELECT format('SELECT %L, count(*) FROM %I.%I;', schemaname || '.' || tablename, schemaname, tablename) FROM pg_tables WHERE schemaname NOT LIKE 'pg_%' AND schemaname <> 'information_schema' ORDER BY 1" \
+       | docker exec -i "$container" psql -U n8n -d n8n -At -F '|'
+   }
+   count_rows "$DB_CONTAINER" > "$BACKUP/n8n-row-counts.tsv"
+   count_rows "$CHECK_CONTAINER" > "$CHECK_DIR/n8n-row-counts.tsv"
+   diff -u "$BACKUP/n8n-row-counts.tsv" "$CHECK_DIR/n8n-row-counts.tsv"
+   docker stop "$CHECK_CONTAINER"
+   ```
+
+3. **Snapshot both Azure disks while the database is stopped.** After the backup and restore test pass, stop only `n8n-db` on the VM from the Compose directory. Verify it is stopped before running the workstation snapshot commands. From the authenticated workstation, use the same `STAMP` and resource group `COMMON`. Inspect the VM's managed-disk **resource IDs** and select the data disk ID explicitly; do not identify a source by an ambiguous disk name.
+
+   On the VM:
+
+   ```bash
+   set -euo pipefail
+   cd /path/to/CommonVM/src
+   docker compose -f docker-compose.yml stop n8n-db
+   docker compose -f docker-compose.yml ps --all n8n-db
+   test -z "$(docker compose -f docker-compose.yml ps --status running -q n8n-db)"
+   ```
+
+   ```bash
+   set -euo pipefail
+   VM_NAME="REPLACE_WITH_VM_RESOURCE_NAME"
+   STAMP="REPLACE_WITH_STAMP"
+   az vm show -g COMMON -n "$VM_NAME" \
+     --query '{osDisk:storageProfile.osDisk.managedDisk.id,dataDisks:storageProfile.dataDisks[].managedDisk.id}' \
+     -o json
+   OS_DISK_ID="REPLACE_WITH_EXACT_OS_DISK_RESOURCE_ID"
+   DATA_DISK_ID="REPLACE_WITH_EXACT_DATA_DISK_RESOURCE_ID"
+   OS_SNAPSHOT="n8n-pg18-os-${STAMP}"
+   DATA_SNAPSHOT="n8n-pg18-data-${STAMP}"
+   az snapshot create -g COMMON -n "$OS_SNAPSHOT" \
+     --source "$OS_DISK_ID" --incremental true --output none
+   az snapshot create -g COMMON -n "$DATA_SNAPSHOT" \
+     --source "$DATA_DISK_ID" --incremental true --output none
+   for SNAPSHOT in "$OS_SNAPSHOT" "$DATA_SNAPSHOT"; do
+     STATE=$(az snapshot show -g COMMON -n "$SNAPSHOT" \
+       --query provisioningState -o tsv)
+     test "$STATE" = Succeeded
+   done
+   ```
+
+   Both snapshot states must be `Succeeded` before proceeding. Keep both snapshots and all backup artifacts.
+
+4. **Restore to a new PostgreSQL 18 data directory, then pass the old-n8n gate.** Before the restore, fetch the upgrade branch and replace only `src/docker-compose.yml` with the approved C1 file. This is a single-file replacement from the exact commit; do not check out or reset the worktree and do not touch `.env`. C1 keeps n8n at `n8nio/n8n:2.32.5`; verify that version and that `2.40.7` is absent before starting n8n. Preserve `/mnt/data/n8n/db`; never copy PG14's physical files into PG18's directory. On the VM, create a previously unused `/mnt/data/n8n/pg`, owned by the PG18 container's `postgres` UID/GID (`70:70` for this Alpine image), and start only `n8n-db`. The image default `PGDATA` is `/var/lib/postgresql/18/docker`:
+
+   From the VM repository root:
+
+   ```bash
+   set -euo pipefail
+   cd /path/to/CommonVM
+   git fetch origin feat/n8n-pg18-upgrade
+   COMPOSE_COMMIT=e8718b9a398699c8d84e7318b8bee87bf4815e46
+   git cat-file -e "${COMPOSE_COMMIT}^{commit}"
+   COMPOSE_TMP=$(mktemp src/.docker-compose.yml.XXXXXX)
+   trap 'rm -f -- "$COMPOSE_TMP"' EXIT
+   git show "${COMPOSE_COMMIT}:src/docker-compose.yml" >| "$COMPOSE_TMP"
+   chmod --reference=src/docker-compose.yml "$COMPOSE_TMP"
+   mv -f -- "$COMPOSE_TMP" src/docker-compose.yml
+   trap - EXIT
+   cd src
+   docker compose -f docker-compose.yml config --quiet
+   grep -F 'image: n8nio/n8n:2.32.5' docker-compose.yml
+   if grep -Fq 'image: n8nio/n8n:2.40.7' docker-compose.yml; then
+     echo "C1 Compose unexpectedly contains n8n 2.40.7; stop."
+     exit 1
+   fi
+   ```
+
+   ```bash
+   set -euo pipefail
+   cd /path/to/CommonVM/src
+   test ! -e /mnt/data/n8n/pg || { echo "PG18 path already exists; stop."; exit 1; }
+   sudo install -d -m 700 -o 70 -g 70 /mnt/data/n8n/pg
+   docker compose -f docker-compose.yml pull n8n-db
+   docker compose -f docker-compose.yml up -d n8n-db
+   docker compose -f docker-compose.yml ps n8n-db
+   docker compose -f docker-compose.yml logs --tail=100 n8n-db
+   ```
+
+   Confirm the new database container is healthy and its actual name before restoring. In a shell on the VM, re-declare the variables and `count_rows` function below; replace `REPLACE_WITH_STAMP` with the same value used for the backup. The block is fail-fast: n8n will not start if the restore, row-count command, or comparison fails. Restore the logical custom dump into the initialized `n8n` database, then compare exact row counts with the saved PG14 counts. Keep n8n at `2.32.5`, and validate database/app health and logs, n8n migrations, workflows, credentials, triggers, and a webhook. Do not proceed to `2.40.7` unless this gate passes.
+
+   ```bash
+   set -euo pipefail
+   set -o noclobber
+   cd /path/to/CommonVM/src
+   STAMP="REPLACE_WITH_STAMP"
+   BACKUP="/mnt/data/backup/n8n-upgrade-${STAMP}"
+   CHECK_DIR="/mnt/data/restore-check/${STAMP}/n8n-pg18"
+   DB_CONTAINER="src-n8n-db-1" # Replace if docker compose ps shows another name.
+   test -s "$BACKUP/n8n.dump"
+   READY=0
+   for attempt in $(seq 1 60); do
+     if docker exec "$DB_CONTAINER" pg_isready -h 127.0.0.1 -U n8n -d n8n >/dev/null; then
+       READY=1
+       break
+     fi
+     sleep 2
+   done
+   test "$READY" -eq 1 || { echo "PostgreSQL did not become ready; stop."; exit 1; }
+   docker exec "$DB_CONTAINER" pg_isready -h 127.0.0.1 -U n8n -d n8n
+   count_rows() {
+     container=$1
+     docker exec "$container" psql -U n8n -d n8n -Atc \
+       "SELECT format('SELECT %L, count(*) FROM %I.%I;', schemaname || '.' || tablename, schemaname, tablename) FROM pg_tables WHERE schemaname NOT LIKE 'pg_%' AND schemaname <> 'information_schema' ORDER BY 1" \
+       | docker exec -i "$container" psql -U n8n -d n8n -At -F '|'
+   }
+   docker exec -i "$DB_CONTAINER" pg_restore -U n8n -d n8n \
+     --no-owner --no-privileges --exit-on-error < "$BACKUP/n8n.dump"
+   docker exec "$DB_CONTAINER" vacuumdb -U n8n -d n8n --analyze-in-stages
+   count_rows "$DB_CONTAINER" > "$CHECK_DIR/live-n8n-row-counts.tsv"
+   diff -u "$BACKUP/n8n-row-counts.tsv" "$CHECK_DIR/live-n8n-row-counts.tsv"
+   grep -F 'image: n8nio/n8n:2.32.5' docker-compose.yml
+   if grep -Fq 'image: n8nio/n8n:2.40.7' docker-compose.yml; then
+     echo "n8n is not pinned to 2.32.5; do not start n8n."
+     exit 1
+   fi
+   docker compose -f docker-compose.yml up -d n8n
+   docker compose -f docker-compose.yml ps n8n n8n-db
+   docker compose -f docker-compose.yml logs --tail=200 n8n n8n-db
+   ```
+
+   After Gate B passes, fetch the upgrade branch and replace only `src/docker-compose.yml` with the approved C2 file. Verify that it pins n8n to `n8nio/n8n:2.40.7` before pulling and recreating **only** n8n. Recheck health/logs, the n8n database migration result, workflows, credentials, triggers, and a webhook. Keep the old database directory, restore-check directory, snapshots, backups, and both old and new images; never prune or delete them.
+
+   ```bash
+   set -euo pipefail
+   cd /path/to/CommonVM
+   git fetch origin feat/n8n-pg18-upgrade
+   COMPOSE_COMMIT=4e591ab000c8ff1a070db88286382707f7003ccf
+   git cat-file -e "${COMPOSE_COMMIT}^{commit}"
+   COMPOSE_TMP=$(mktemp src/.docker-compose.yml.XXXXXX)
+   trap 'rm -f -- "$COMPOSE_TMP"' EXIT
+   git show "${COMPOSE_COMMIT}:src/docker-compose.yml" >| "$COMPOSE_TMP"
+   chmod --reference=src/docker-compose.yml "$COMPOSE_TMP"
+   mv -f -- "$COMPOSE_TMP" src/docker-compose.yml
+   trap - EXIT
+   cd src
+   docker compose -f docker-compose.yml config --quiet
+   grep -F 'image: n8nio/n8n:2.40.7' docker-compose.yml
+   if grep -Fq 'image: n8nio/n8n:2.32.5' docker-compose.yml; then
+     echo "C2 Compose unexpectedly contains n8n 2.32.5; stop."
+     exit 1
+   fi
+   docker compose -f docker-compose.yml pull n8n
+   docker compose -f docker-compose.yml up -d --no-deps n8n
+   docker compose -f docker-compose.yml ps n8n n8n-db
+   docker compose -f docker-compose.yml logs --tail=200 n8n
+   test "$(docker inspect --format '{{.Config.Image}}' "$(docker compose -f docker-compose.yml ps -q n8n)")" = n8nio/n8n:2.40.7
+   ```
+
+5. **Rollback limits.** Never downgrade n8n against a database already migrated by the newer n8n version. Stop n8n first and dump PG18 if it is readable. If it cannot be dumped, report this explicitly and keep its data directory untouched for investigation. Stop only n8n and n8n-db, then reattach the **unchanged** PostgreSQL 14 directory `/mnt/data/n8n/db` by restoring the baseline Compose file; never copy files over it. The baseline commit must already exist locally, so rollback does not rely on a network fetch. Do not check out/reset the worktree or touch `.env`. Writes made on PG18 will not exist in PG14. Do not delete backups, snapshots, restore-check files, or images.
+
+   From the VM repository root:
+
+   ```bash
+   set -euo pipefail
+   set -o noclobber
+   cd /path/to/CommonVM
+   STAMP="REPLACE_WITH_STAMP"
+   BACKUP="/mnt/data/backup/n8n-upgrade-${STAMP}"
+   test -d "$BACKUP"
+   COMPOSE_COMMIT=a4f80d74159cbff2fe850f38fc1fddc92072b270
+   git cat-file -e "${COMPOSE_COMMIT}^{commit}"
+   test "$(sudo cat /mnt/data/n8n/db/PG_VERSION)" = 14
+   cd src
+   docker compose -f docker-compose.yml stop n8n
+   DB_CONTAINER=$(docker compose -f docker-compose.yml ps -q n8n-db)
+   if [ -n "$DB_CONTAINER" ] &&
+      [ "$(docker inspect --format '{{.Config.Image}}' "$DB_CONTAINER")" = postgres:18.6-alpine ]; then
+     if docker exec "$DB_CONTAINER" pg_isready -U n8n -d n8n >/dev/null; then
+       ROLLBACK_DUMP="$BACKUP/n8n-pg18-at-rollback-$(date +%Y%m%d-%H%M%S)-$$.dump"
+       test ! -e "$ROLLBACK_DUMP"
+       if docker exec "$DB_CONTAINER" pg_dump -U n8n -d n8n -Fc > "$ROLLBACK_DUMP"; then
+         sha256sum "$ROLLBACK_DUMP" > "$ROLLBACK_DUMP.sha256"
+         chmod 600 "$ROLLBACK_DUMP" "$ROLLBACK_DUMP.sha256"
+         echo "PG18 rollback dump preserved."
+       else
+         echo "PG18 dump failed; preserve /mnt/data/n8n/pg for investigation." >&2
+       fi
+     else
+       echo "PG18 is unreadable; preserve /mnt/data/n8n/pg for investigation." >&2
+     fi
+   else
+     echo "No running PG18 container found; preserve /mnt/data/n8n/pg if present." >&2
+   fi
+   docker compose -f docker-compose.yml stop n8n-db
+   cd ..
+   COMPOSE_TMP=$(mktemp src/.docker-compose.yml.XXXXXX)
+   trap 'rm -f -- "$COMPOSE_TMP"' EXIT
+   git show "${COMPOSE_COMMIT}:src/docker-compose.yml" >| "$COMPOSE_TMP"
+   chmod --reference=src/docker-compose.yml "$COMPOSE_TMP"
+   mv -f -- "$COMPOSE_TMP" src/docker-compose.yml
+   trap - EXIT
+   cd src
+   docker compose -f docker-compose.yml config --quiet
+   grep -F 'image: postgres:14.23-alpine' docker-compose.yml
+   grep -F '/n8n/db:/var/lib/postgresql/data' docker-compose.yml
+   grep -F 'image: n8nio/n8n:2.32.5' docker-compose.yml
+   docker compose -f docker-compose.yml up -d --no-deps n8n-db
+   DB_CONTAINER=$(docker compose -f docker-compose.yml ps -q n8n-db)
+   test -n "$DB_CONTAINER"
+   test "$(docker inspect --format '{{.Config.Image}}' "$DB_CONTAINER")" = postgres:14.23-alpine
+   test "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Source}}{{end}}{{end}}' "$DB_CONTAINER")" = /mnt/data/n8n/db
+   READY=0
+   for attempt in $(seq 1 60); do
+     if docker exec "$DB_CONTAINER" pg_isready -U n8n -d n8n >/dev/null; then
+       READY=1
+       break
+     fi
+     sleep 2
+   done
+   test "$READY" -eq 1 || { echo "PostgreSQL 14 did not become ready; stop."; exit 1; }
+   docker compose -f docker-compose.yml up -d --no-deps n8n
+   N8N_CONTAINER=$(docker compose -f docker-compose.yml ps -q n8n)
+   test "$(docker exec "$N8N_CONTAINER" n8n --version)" = 2.32.5
+   docker compose -f docker-compose.yml ps n8n n8n-db
+   ```
 
 ### Monitoring
 

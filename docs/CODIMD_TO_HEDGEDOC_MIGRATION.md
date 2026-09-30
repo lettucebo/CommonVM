@@ -89,6 +89,7 @@ Do not set
 cd /path/to/CommonVM/src
 docker compose config --quiet
 sudo mkdir -p /mnt/data/hedgedoc/db /mnt/data/hedgedoc/uploads
+sudo chown 70:70 /mnt/data/hedgedoc/db
 sudo chown -R 10000:10000 /mnt/data/hedgedoc/uploads
 docker compose up -d hedgedoc-db
 docker compose ps
