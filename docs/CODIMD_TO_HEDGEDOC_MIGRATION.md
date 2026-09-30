@@ -164,13 +164,16 @@ docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d hedg
 # deduplicate without losing query strings. Ensure the AkaMoney count matches
 # the SELECT result count before accepting the list.
 sort -u "$B/db-paths.txt" "$B/aka-paths.txt" > "$B/paths.txt"
-docker run --rm --network src_web \
+docker run --rm -i --network src_web --entrypoint sh \
   -e A_HOST="<CODIMD_DOMAIN>" -e B_HOST="hedgedoc.yu.money" \
-  -v "$S:/work:ro" -v "$B:/results" \
-  curlimages/curl:latest sh /work/compare-note-links.sh /results/paths.txt > "$B/links.tsv"
+  -v "$S:/work:ro" \
+  curlimages/curl:latest /work/compare-note-links.sh /dev/stdin \
+  < "$B/paths.txt" > "$B/links.tsv"
 ```
 
-Do not accept any `ERROR`; investigate every `DIFF`. All AkaMoney paths
+Do not accept any `ERROR`; investigate every `DIFF`. `title-brand` means the
+note title is identical except for the expected ` - CodiMD` / ` - HedgeDoc`
+browser-title suffix; changed note titles still fail. All AkaMoney paths
 must be `OK`. `/pdf` and `/pandoc` do not exist in HedgeDoc: inventory these
 and request an explicit decision **per affected link** before cutover, even
 when AkaMoney does not contain it. Live changes after the dump must be

@@ -17,6 +17,18 @@ done
 case "$url" in *old.example*) side=old ;; *) side=new ;; esac
 case "$url" in
     */note) code=200; body='<title>Same note</title>'; loc= ;;
+    */branded)
+        code=200; loc=
+        if [ "$side" = old ]; then body='<title>Same note - CodiMD</title>'
+        else body='<title>Same note - HedgeDoc</title>'; fi ;;
+    */different-title)
+        code=200; loc=
+        if [ "$side" = old ]; then body='<title>First note - CodiMD</title>'
+        else body='<title>Second note - HedgeDoc</title>'; fi ;;
+    */different/download)
+        code=200; loc=
+        if [ "$side" = old ]; then body='text - CodiMD'
+        else body='text - HedgeDoc'; fi ;;
     */same/info)
         code=200; loc=
         if [ "$side" = old ]; then body='{"viewcount":1,"content":"same"}'
@@ -39,18 +51,21 @@ SH
 chmod +x "$DIR/curl"
 PATH="$DIR:$PATH"
 export PATH
-printf '/note\n/same/info\n/redirect\n' > "$DIR/ok"
-printf '/different/info\n/bad\n/unreachable\n' > "$DIR/bad"
+printf '/note\n/branded\n/same/info\n/redirect\n' > "$DIR/ok"
+printf '/different-title\n/different/download\n/different/info\n/bad\n/unreachable\n' > "$DIR/bad"
 export A_BASE=http://old.example B_BASE=http://new.example
 export A_HOST=old.example B_HOST=new.example
 SCRIPT=$(dirname "$0")/compare-note-links.sh
 sh "$SCRIPT" "$DIR/ok" > "$DIR/ok.tsv"
 grep -q '^OK[[:space:]]/same/info[[:space:]]' "$DIR/ok.tsv"
+grep -q '^OK[[:space:]]/branded[[:space:]].*title-brand$' "$DIR/ok.tsv"
 if sh "$SCRIPT" "$DIR/bad" > "$DIR/bad.tsv"; then
     echo 'Different note and 500 must not pass' >&2
     exit 1
 fi
 grep -q '^DIFF[[:space:]]/different/info[[:space:]]' "$DIR/bad.tsv"
+grep -q '^DIFF[[:space:]]/different-title[[:space:]].*title-diff$' "$DIR/bad.tsv"
+grep -q '^DIFF[[:space:]]/different/download[[:space:]].*body-diff$' "$DIR/bad.tsv"
 grep -q '^ERROR[[:space:]]/bad[[:space:]]' "$DIR/bad.tsv"
 grep -q '^ERROR[[:space:]]/unreachable[[:space:]]' "$DIR/bad.tsv"
 echo 'compare-note-links: PASS'

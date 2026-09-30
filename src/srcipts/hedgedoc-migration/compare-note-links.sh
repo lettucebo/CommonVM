@@ -24,7 +24,7 @@ location() {
     esac
 }
 title() {
-    tr -d '\n' < "$1" | sed -nE 's#.*<title>([^<]*)</title>.*#\1#p' | head -c 300
+    tr -d '\n' < "$1" | sed -nE 's#.*<title>([^<]*)</title>.*#\1#p'
 }
 info() {
     # Views of /s/ increment only in the live CodiMD database.
@@ -53,7 +53,18 @@ while IFS= read -r path || [ -n "$path" ]; do
             */info)
                 if [ "$(info "$work/a")" = "$(info "$work/b")" ]; then check=body-same; else check=body-diff; fi ;;
             *)
-                if [ "$(title "$work/a")" = "$(title "$work/b")" ]; then check=title-same; else check=title-diff; fi ;;
+                a_title=$(title "$work/a")
+                b_title=$(title "$work/b")
+                if [ "$a_title" = "$b_title" ]; then
+                    check=title-same
+                elif [ -n "$a_title" ] && [ -n "$b_title" ] &&
+                     [ "${a_title% - CodiMD}" != "$a_title" ] &&
+                     [ "${b_title% - HedgeDoc}" != "$b_title" ] &&
+                     [ "${a_title% - CodiMD}" = "${b_title% - HedgeDoc}" ]; then
+                    check=title-brand
+                else
+                    check=title-diff
+                fi ;;
         esac
     fi
     verdict=OK

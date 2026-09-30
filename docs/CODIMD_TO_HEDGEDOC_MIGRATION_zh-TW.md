@@ -158,13 +158,16 @@ docker exec -i src-hedgedoc-db-1 psql -qX -v ON_ERROR_STOP=1 -U hedgedoc -d hedg
 # 將 db-paths.txt 與 AkaMoney 的原始 paths 合併至 paths.txt；
 # 保留 query string；確認 AkaMoney 筆數與 SELECT 結果相同。
 sort -u "$B/db-paths.txt" "$B/aka-paths.txt" > "$B/paths.txt"
-docker run --rm --network src_web \
+docker run --rm -i --network src_web --entrypoint sh \
   -e A_HOST="<CODIMD_DOMAIN>" -e B_HOST="hedgedoc.yu.money" \
-  -v "$S:/work:ro" -v "$B:/results" \
-  curlimages/curl:latest sh /work/compare-note-links.sh /results/paths.txt > "$B/links.tsv"
+  -v "$S:/work:ro" \
+  curlimages/curl:latest /work/compare-note-links.sh /dev/stdin \
+  < "$B/paths.txt" > "$B/links.tsv"
 ```
 
-`ERROR` 必須為零；逐一調查 `DIFF`；AkaMoney 的連結 **100% OK**。
+`ERROR` 必須為零；逐一調查 `DIFF`。`title-brand` 表示筆記標題相同，
+僅瀏覽器標題的 ` - CodiMD`／` - HedgeDoc` 後綴不同；真正的標題異動
+仍判失敗。AkaMoney 的連結 **100% OK**。
 HedgeDoc 沒有 `/pdf`、`/pandoc`：切換前逐條列出並向使用者取得
 明確決定，即使該連結不在 AkaMoney。dump 後的新異動需要在切換時
 重新同步資料並比對；也要經 Cloudflare/Caddy 測試每條 AkaMoney
