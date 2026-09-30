@@ -1,6 +1,8 @@
 # CodiMD、Outline、n8n、Open WebUI 與 RustDesk 合併服務
 
-此設定使用 Docker Compose，將 CodiMD、Outline、n8n、Open WebUI 與 RustDesk 合併到單一 VM 上。Caddy 負責 CodiMD、n8n、Outline 與 Open WebUI 的反向代理。
+此設定使用 Docker Compose，將 CodiMD、HedgeDoc、Outline、n8n、Open WebUI 與 RustDesk 合併到單一 VM 上。Caddy 負責 CodiMD、HedgeDoc、n8n、Outline 與 Open WebUI 的反向代理。HedgeDoc 是需明確啟用的平行遷移目標；CodiMD 保持運作。
+
+> **HedgeDoc 遷移**：啟用 profile 前先閱讀[遷移手冊](docs/CODIMD_TO_HEDGEDOC_MIGRATION_zh-TW.md)。變更前須備份資料庫，並對 VM 的 OS/data disks 建立 snapshot；HedgeDoc 絕不能連到 CodiMD 資料庫。
 
 > **說明**：此專案合併了多個部署：
 > - [n8n-azure-vm-starter](https://github.com/lettucebo/n8n-azure-vm-starter) - n8n 工作流程自動化
@@ -18,6 +20,7 @@
 - 給 Caddy 與 RustDesk 使用的公用 IP 位址
 - 指向 VM IP 的 DNS 紀錄，每個由 Caddy 代理的服務各一筆 (詳見 `.env`)：
   - CodiMD (`CODIMD_DOMAIN`)
+  - HedgeDoc staging (`HEDGEDOC_STAGING_DOMAIN`，僅遷移期間)
   - n8n (`N8N_DOMAIN`)
   - Outline (`OUTLINE_DOMAIN`)
   - Open WebUI (`OPENWEBUI_DOMAIN`)
@@ -101,6 +104,11 @@ newgrp docker
      只有在評估 VM 記憶體與磁碟容量後才提高。
    - Open WebUI 第一次啟動前，先完成所有 `OPENWEBUI_*` 佔位值設定
      (包含 `OPENWEBUI_ALLOWED_IPS`)。
+   - 發布 HedgeDoc staging 前，在 `.env` 設定
+     `HEDGEDOC_STAGING_DOMAIN` 和 `HEDGEDOC_STAGING_ALLOWED_IPS`
+     （測試者目前 IP/CIDR）；空白 allowlist 拒絕所有請求。未設定網域
+     時 Caddy 使用僅限本機的預設值，不影響共用反向代理。獨立資料庫
+     副本還原並通過預檢前，不可啟動 HedgeDoc profile。
    - **重要**：修改 `.env` 中的 `DATA_ROOT` 變數，將其指向您的掛載路徑 (預設：`/mnt/data`)。
 4. **設定資料夾權限**：
    由於容器內的使用者 ID (UID) 可能與主機不同，請執行以下指令修正資料夾權限，以避免 `Permission denied` 錯誤：
@@ -111,6 +119,10 @@ newgrp docker
 
    # 修正 CodiMD 資料夾權限 (UID 1500)
    sudo chown -R 1500:1500 /mnt/data/codimd
+
+   # HedgeDoc uploads (UID 10000)；不可修改 CodiMD 擁有權。
+   sudo mkdir -p /mnt/data/hedgedoc/uploads
+   sudo chown -R 10000:10000 /mnt/data/hedgedoc/uploads
 
    # 修正 Outline 資料夾權限 (UID 1001，即映像檔內的 "nodejs" 使用者)
    sudo mkdir -p /mnt/data/outline/data /mnt/data/outline/db /mnt/data/outline/redis
@@ -708,7 +720,7 @@ htop
 
 ### 備份
 
-備份三套 PostgreSQL、Outline 本機附件，以及 Open WebUI 本機資料。以下指令會建立帶時間戳記的新檔，不會覆蓋既有備份。
+備份既有三套 PostgreSQL、Outline 本機附件，以及 Open WebUI 本機資料。HedgeDoc 的獨立資料庫與 uploads 也要按[遷移手冊](docs/CODIMD_TO_HEDGEDOC_MIGRATION_zh-TW.md)在切換前與後續備份中納入；不能把原先的 CodiMD dump 當作 HedgeDoc 新編輯的備份。以下指令會建立帶時間戳記的新檔，不會覆蓋既有備份。
 
 ```bash
 # 先切到 Compose 專案目錄，讓 docker compose 能找到 docker-compose.yml。
@@ -722,6 +734,17 @@ docker exec src-n8n-db-1 pg_dump -U n8n -d n8n -Fc --no-owner --no-privileges \
   > "/mnt/data/backup/${STAMP}/n8n.dump"
 docker exec src-outline-db-1 pg_dump -U outline -d outline -Fc --no-owner --no-privileges \
   > "/mnt/data/backup/${STAMP}/outline.dump"
+# hedgedoc-db 運作後備份其目前的資料庫與 uploads。
+if docker compose ps --status running --services | grep -qx hedgedoc-db; then
+  docker compose exec -T hedgedoc-db sh -ec \
+    'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc --no-owner --no-privileges' \
+    > "/mnt/data/backup/${STAMP}/hedgedoc.dump"
+  sudo tar czf "/mnt/data/backup/${STAMP}/hedgedoc-uploads.tar.gz" \
+    -C /mnt/data/hedgedoc uploads
+  docker compose exec -T hedgedoc-db pg_restore --list \
+    < "/mnt/data/backup/${STAMP}/hedgedoc.dump" > /dev/null
+  tar tzf "/mnt/data/backup/${STAMP}/hedgedoc-uploads.tar.gz" > /dev/null
+fi
 
 # 部分私密附件為 mode 0600，且由 Outline UID 1001 擁有。
 sudo tar czf "/mnt/data/backup/${STAMP}/outline-data.tar.gz" \

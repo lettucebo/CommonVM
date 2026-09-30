@@ -18,6 +18,9 @@ services:
       - ACME_EMAIL=${ACME_EMAIL}
       - CADDY_TLS=${CADDY_TLS}
       - CODIMD_DOMAIN=${CODIMD_DOMAIN}
+      - CODIMD_UPSTREAM=${CODIMD_UPSTREAM:-codimd:3000}
+      - HEDGEDOC_STAGING_DOMAIN=${HEDGEDOC_STAGING_DOMAIN:-hedgedoc.localhost}
+      - HEDGEDOC_STAGING_ALLOWED_IPS=${HEDGEDOC_STAGING_ALLOWED_IPS:-}
       - N8N_DOMAIN=${N8N_DOMAIN}
       - OUTLINE_DOMAIN=${OUTLINE_DOMAIN}
       - OPENWEBUI_DOMAIN=${OPENWEBUI_DOMAIN}
@@ -68,6 +71,69 @@ services:
       - codimd-db
     volumes:
       - ${DATA_ROOT}/codimd/uploads:/home/hackmd/app/public/uploads
+    networks:
+      - web
+      - backend
+
+  # Separate database for a copy of CodiMD data. PostgreSQL 18 stores PGDATA
+  # under /var/lib/postgresql/18/docker; never mount the CodiMD database here.
+  hedgedoc-db:
+    image: postgres:18.6-alpine
+    restart: always
+    environment:
+      - POSTGRES_USER=${HEDGEDOC_DB_USER}
+      - POSTGRES_PASSWORD=${HEDGEDOC_DB_PASSWORD}
+      - POSTGRES_DB=${HEDGEDOC_DB_NAME}
+    volumes:
+      - ${DATA_ROOT}/hedgedoc/db:/var/lib/postgresql
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - backend
+
+  # Opt in explicitly, only after restoring and validating a database copy.
+  hedgedoc:
+    image: quay.io/hedgedoc/hedgedoc:1.12.0
+    profiles: ["hedgedoc"]
+    restart: always
+    environment:
+      - CMD_DB_URL=postgres://${HEDGEDOC_DB_USER}:${HEDGEDOC_DB_PASSWORD}@hedgedoc-db:5432/${HEDGEDOC_DB_NAME}
+      - CMD_DOMAIN=${HEDGEDOC_DOMAIN}
+      - CMD_PROTOCOL_USESSL=true
+      - CMD_URL_ADDPORT=false
+      - CMD_USECDN=false
+      - CMD_ALLOW_ANONYMOUS=false
+      - CMD_ALLOW_FREEURL=false
+      - CMD_EMAIL=false
+      - CMD_ALLOW_EMAIL_REGISTER=false
+      - CMD_SESSION_SECRET=${HEDGEDOC_SESSION_SECRET}
+      - CMD_RATE_LIMIT_USING_CLOUDFLARE=true
+      # Do not set CMD_OAUTH2_USER_PROFILE_ID_ATTR: both apps use the
+      # username claim as profileid and retain the same note owners.
+      - CMD_OAUTH2_PROVIDERNAME=${CODIMD_OAUTH2_PROVIDERNAME}
+      - CMD_OAUTH2_SCOPE=${CODIMD_OAUTH2_SCOPE}
+      - CMD_OAUTH2_CLIENT_ID=${CODIMD_OAUTH2_CLIENT_ID}
+      - CMD_OAUTH2_CLIENT_SECRET=${CODIMD_OAUTH2_CLIENT_SECRET}
+      - CMD_OAUTH2_AUTHORIZATION_URL=${CODIMD_OAUTH2_AUTHORIZATION_URL}
+      - CMD_OAUTH2_TOKEN_URL=${CODIMD_OAUTH2_TOKEN_URL}
+      - CMD_OAUTH2_USER_PROFILE_URL=${CODIMD_OAUTH2_USER_PROFILE_URL}
+      - CMD_OAUTH2_USER_PROFILE_DISPLAY_NAME_ATTR=${CODIMD_OAUTH2_USER_PROFILE_DISPLAY_NAME_ATTR}
+      - CMD_OAUTH2_USER_PROFILE_USERNAME_ATTR=${CODIMD_OAUTH2_USER_PROFILE_USERNAME_ATTR}
+      - CMD_OAUTH2_USER_PROFILE_EMAIL_ATTR=${CODIMD_OAUTH2_USER_PROFILE_EMAIL_ATTR}
+      - CMD_IMAGE_UPLOAD_TYPE=azure
+      - CMD_AZURE_CONNECTION_STRING=${CODIMD_AZURE_CONNECTION_STRING}
+      - CMD_AZURE_CONTAINER=${CODIMD_AZURE_CONTAINER}
+    volumes:
+      - ${DATA_ROOT}/hedgedoc/uploads:/hedgedoc/public/uploads
+    mem_limit: 512m
+    depends_on:
+      hedgedoc-db:
+        condition: service_healthy
     networks:
       - web
       - backend

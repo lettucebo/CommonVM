@@ -1,6 +1,6 @@
 # CommonVM — Copilot Instructions
 
-This repo is **infrastructure-as-config**, not an application. It deploys CodiMD, n8n, and a
+This repo is **infrastructure-as-config**, not an application. It deploys CodiMD, HedgeDoc, n8n, and a
 RustDesk relay onto a single Azure VM via Docker Compose, fronted by Caddy. There is no app
 code, build step, or test suite — changes are YAML, Caddy config, shell/PowerShell scripts,
 and bilingual Markdown docs.
@@ -27,9 +27,12 @@ directory's path. Always confirm real names with `docker compose ps` before any
   and is NOT proxied by Caddy — it needs raw TCP 21114-21119 / UDP 21116.
 - **Caddy** terminates TLS (Let's Encrypt) and reverse-proxies `CODIMD_DOMAIN→codimd:3000`,
   `N8N_DOMAIN→n8n:5678`. Each app has its own pinned Postgres (`codimd-db` 11.6, `n8n-db` 14).
+- **HedgeDoc** runs only with `--profile hedgedoc` after restoring a CodiMD dump to the separate
+  `hedgedoc-db` (Postgres 18). Never start it against the CodiMD database. Follow
+  `docs/CODIMD_TO_HEDGEDOC_MIGRATION.md` for backups, snapshots and link validation.
 - **All persistent data lives under `${DATA_ROOT}` (default `/mnt/data`)** — the Azure data disk.
   Never store data on the temporary disk; it is wiped on reboot. Host folders need specific UIDs:
-  n8n = `1000:1000`, codimd = `1500:1500`.
+  n8n = `1000:1000`, codimd = `1500:1500`, hedgedoc uploads = `10000:10000`.
 
 ## Conventions
 

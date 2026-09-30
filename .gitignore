@@ -24,6 +24,11 @@ logs/
 
 # Database dumps and archives (NEVER commit: this is a PUBLIC repository)
 *.sql
+# Migration verification queries are source files, not database dumps.
+!src/srcipts/hedgedoc-migration/preflight-orphans.sql
+!src/srcipts/hedgedoc-migration/preflight-pending-revisions.sql
+!src/srcipts/hedgedoc-migration/note-fingerprint.sql
+!src/srcipts/hedgedoc-migration/build-link-inventory.sql
 *.dump
 *.sql.gz
 *.tar

@@ -15,8 +15,9 @@
 
 # CodiMD
 {$CODIMD_DOMAIN} {
-    reverse_proxy codimd:3000 {
+    reverse_proxy {$CODIMD_UPSTREAM:codimd:3000} {
         header_up X-Forwarded-For {client_ip}
+        header_up X-Forwarded-Proto "https"
     }
 
     # Certificate mode, driven by CADDY_TLS in .env.
@@ -30,6 +31,28 @@
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
         X-XSS-Protection "1; mode=block"
         X-Frame-Options "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"
+    }
+}
+
+# HedgeDoc staging. A local fallback keeps the shared proxy valid if the
+# deployment has not supplied the staging hostname yet.
+{$HEDGEDOC_STAGING_DOMAIN:hedgedoc.localhost} {
+    # A copy can retain notes later made private or deleted in live CodiMD.
+    # Restrict staging to authorized testers; an empty allowlist denies all.
+    @not_allowed not client_ip {$HEDGEDOC_STAGING_ALLOWED_IPS}
+    respond @not_allowed "Forbidden" 403
+
+    reverse_proxy hedgedoc:3000 {
+        header_up X-Forwarded-For {client_ip}
+        header_up X-Forwarded-Proto "https"
+        header_up Host {host}
+    }
+
+    {$CADDY_TLS}
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
         X-Content-Type-Options "nosniff"
     }
 }
